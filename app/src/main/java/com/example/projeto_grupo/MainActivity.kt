@@ -22,13 +22,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.projeto_grupo.ui.EquationViewModel
 import com.example.projeto_grupo.ui.ar.ARSceneScreen
-import com.example.projeto_grupo.ui.components.EquationBottomSheet
+import com.example.projeto_grupo.ui.EquationBottomSheet
+import com.example.projeto_grupo.ui.home.HomeScreen
 import com.example.projeto_grupo.ui.theme.Projeto_grupoTheme
 
 class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
+    ) { _ ->
         // Handle camera permission result
     }
 
@@ -78,7 +79,10 @@ fun Projeto_grupoApp() {
                         EquationBottomSheet(viewModel = viewModel)
                     }
                     AppDestinations.HOME -> {
-                        Greeting(name = "Equações RA")
+                        HomeScreen(
+                            viewModel = viewModel,
+                            onNavigateToAR = { currentDestination = AppDestinations.AR_VIEWER }
+                        )
                     }
                     AppDestinations.FAVORITES -> {
                         Greeting(name = "Favoritos")

@@ -7,16 +7,19 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.opengl.Matrix
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,11 +29,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogWindowProvider
 import com.example.projeto_grupo.data.model.EquationModel
 import com.example.projeto_grupo.data.model.PointType
 import com.example.projeto_grupo.ui.EquationViewModel
@@ -93,7 +99,7 @@ private const val KEY_EAST_OFFSET = "saved_east_offset"
 private const val KEY_CAMERA_DROP_Y = "saved_camera_drop_y"
 private const val KEY_PLACED_AZIMUTH = "saved_placed_azimuth"
 
-// Shared 3D graph dimensions so smooth surface mesh, 3D pins, and projected labels align exactly
+// Shared 3D graph dimensions (Filament Y-up: mathX -> worldX, mathY -> worldZ, mathZ = f(x, y) -> worldY)
 private const val GRAPH_BASE_ELEVATION = 0.14f
 private const val GRAPH_HALF_SPAN = 0.18f
 private const val GRAPH_MATH_DOMAIN = 2.0
@@ -206,6 +212,7 @@ fun ARSceneScreen(
 
     var isScaling by remember { mutableStateOf(false) }
     var lastPinchSpan by remember { mutableFloatStateOf(0f) }
+    var showSaveDialog by remember { mutableStateOf(false) }
 
     fun saveTransformOnly() {
         prefs.edit()
@@ -459,7 +466,7 @@ fun ARSceneScreen(
                     eqNode.quaternion = smoothQuaternion
                 }
 
-                // 4. Project 3D equation header, axes, and POI pins onto screen coordinates
+                // 4. Project 3D equation header, axes (+X, +Y, +Z), and POI pins onto screen coordinates
                 if (modelPlaced && !isTrackingLost && eqNode != null &&
                     updatedFrame.camera.trackingState == TrackingState.TRACKING
                 ) {
@@ -492,7 +499,7 @@ fun ARSceneScreen(
 
                     val nextAnnotations = ArrayList<ProjectedAnnotation>(24)
 
-                    // Floating mathematical equation banner anchored directly above the 3D Y-axis
+                    // Floating mathematical equation banner anchored directly above the vertical +Z axis
                     projectLocal(Float3(0f, GRAPH_BASE_ELEVATION + 0.175f, 0f))?.let { (sx, sy) ->
                         nextAnnotations += ProjectedAnnotation(
                             id = "eq_header",
@@ -503,18 +510,18 @@ fun ARSceneScreen(
                         )
                     }
 
-                    // 3D Axis tip labels
+                    // 3D Axis tip labels (math X -> Filament X, math Y -> Filament Z, math Z -> Filament Y)
                     projectLocal(Float3(0.23f, GRAPH_BASE_ELEVATION, 0f))?.let { (sx, sy) ->
                         nextAnnotations += ProjectedAnnotation("axis_x", "+X", null, sx, sy, AnnotationKind.AXIS)
                     }
                     projectLocal(Float3(0f, GRAPH_BASE_ELEVATION, 0.23f))?.let { (sx, sy) ->
-                        nextAnnotations += ProjectedAnnotation("axis_z", "+Z", null, sx, sy, AnnotationKind.AXIS)
+                        nextAnnotations += ProjectedAnnotation("axis_y", "+Y", null, sx, sy, AnnotationKind.AXIS)
                     }
                     projectLocal(Float3(0f, GRAPH_BASE_ELEVATION + 0.145f, 0f))?.let { (sx, sy) ->
-                        nextAnnotations += ProjectedAnnotation("axis_y", "Y", null, sx, sy, AnnotationKind.AXIS)
+                        nextAnnotations += ProjectedAnnotation("axis_z", "+Z", null, sx, sy, AnnotationKind.AXIS)
                     }
 
-                    // 3D POI pin callouts (controlled directly by the AR UI toggles)
+                    // 3D POI pin callouts (poi.x = mathX, poi.y = mathY, poi.z = f(x, y))
                     var zeroCount = 0
                     uiState.equation.pointsOfInterest.forEach { poi ->
                         val kind = when (poi.type) {
@@ -531,17 +538,17 @@ fun ARSceneScreen(
 
                         val localX = ((poi.x / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
                             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-                        val localZ = ((poi.z / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
+                        val localZ = ((poi.y / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
                             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-                        val clampedMathY = poi.y.coerceIn(-1.8, 1.8).toFloat()
+                        val clampedMathZ = poi.z.coerceIn(-1.8, 1.8).toFloat()
                         val pinHeight = if (kind == AnnotationKind.ZERO) 0.030f else 0.044f
-                        val pinTopY = GRAPH_BASE_ELEVATION + clampedMathY * GRAPH_VERTICAL_SCALE + pinHeight + 0.008f
+                        val pinTopY = GRAPH_BASE_ELEVATION + clampedMathZ * GRAPH_VERTICAL_SCALE + pinHeight + 0.008f
 
                         projectLocal(Float3(localX, pinTopY, localZ))?.let { (sx, sy) ->
                             val labelText = when (kind) {
-                                AnnotationKind.MAXIMA -> "Máx ${poi.y} (${poi.x}, ${poi.z})"
-                                AnnotationKind.MINIMA -> "Mín ${poi.y} (${poi.x}, ${poi.z})"
-                                AnnotationKind.ZERO -> "Zero (${poi.x}, ${poi.z})"
+                                AnnotationKind.MAXIMA -> "Máx ${poi.z} (${poi.x}, ${poi.y})"
+                                AnnotationKind.MINIMA -> "Mín ${poi.z} (${poi.x}, ${poi.y})"
+                                AnnotationKind.ZERO -> "Zero (${poi.x}, ${poi.y})"
                                 else -> poi.label
                             }
                             nextAnnotations += ProjectedAnnotation(
@@ -681,8 +688,8 @@ fun ARSceneScreen(
                                     viewModel.setBottomSheetVisible(true)
                                 },
                             shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                            tonalElevation = 6.dp
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.60f),
+                            tonalElevation = 0.dp
                         ) {
                             Column(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -690,7 +697,7 @@ fun ARSceneScreen(
                             ) {
                                 MathFormulaView(
                                     expression = uiState.equation.expression,
-                                    prefix = "f(x, z) = ",
+                                    prefix = "z = f(x, y) = ",
                                     fontSize = 15.sp,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
@@ -733,7 +740,7 @@ fun ARSceneScreen(
                                         y = (ann.screenY - halfH).roundToInt()
                                     )
                                 }
-                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
+                                .background(Color.Black.copy(alpha = 0.60f), RoundedCornerShape(4.dp))
                                 .padding(horizontal = 5.dp, vertical = 2.dp)
                         ) {
                             Text(
@@ -791,7 +798,7 @@ fun ARSceneScreen(
             }
         }
 
-        // Direct AR HUD toggles for Máximos, Mínimos & Zeros (replaces checkboxes in Aba 1)
+        // Direct AR HUD toggles for Máximos, Mínimos & Zeros
         if (modelPlaced && !isTrackingLost) {
             ArPoiFilterBar(
                 showMaxima = uiState.showMaxima,
@@ -806,28 +813,42 @@ fun ARSceneScreen(
             )
         }
 
-        if (modelPlaced) {
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             SmallFloatingActionButton(
-                onClick = {
-                    anchorNodeRef?.detachAnchor()
-                    childNodes.clear()
-                    anchorNodeRef = null
-                    equationNodeRef = null
-                    isTrackingLost = false
-                    autoRestoreStopped = true
-                    modelPlaced = false
-                    projectedAnnotations = emptyList()
-                },
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(24.dp)
+                onClick = { showSaveDialog = true },
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.60f)
             ) {
-                Icon(Icons.Default.Refresh, contentDescription = "Reposicionar modelo")
+                Icon(Icons.Default.Save, contentDescription = "Guardar equação")
+            }
+
+            if (modelPlaced) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        anchorNodeRef?.detachAnchor()
+                        childNodes.clear()
+                        anchorNodeRef = null
+                        equationNodeRef = null
+                        isTrackingLost = false
+                        autoRestoreStopped = true
+                        modelPlaced = false
+                        projectedAnnotations = emptyList()
+                    },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.60f)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Reposicionar modelo")
+                }
             }
         }
 
         FloatingActionButton(
             onClick = { viewModel.setBottomSheetVisible(true) },
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.60f),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(24.dp)
@@ -839,32 +860,44 @@ fun ARSceneScreen(
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(24.dp),
+                    .padding(start = 24.dp, end = 92.dp, bottom = 24.dp),
                 shape = MaterialTheme.shapes.medium,
-                tonalElevation = 6.dp
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.60f),
+                tonalElevation = 0.dp
             ) {
-                val prompt = when {
-                    hasStoredModel && hasStoredLocation && !autoRestoreStopped ->
-                        "A procurar a superfície original... Aponte para o mesmo local ou toque numa grelha."
-                    hasStoredModel ->
-                        "Toque na superfície onde pretende colocar o modelo guardado."
-                    else ->
-                        "Mova a câmara lentamente sobre uma superfície com textura até formar uma grelha e toque para ancorar."
+                val isSearchingSaved = hasStoredModel && hasStoredLocation && !autoRestoreStopped
+                Column(modifier = Modifier.padding(16.dp)) {
+                    val prompt = when {
+                        isSearchingSaved ->
+                            "A procurar a superfície original... Aponte para o mesmo local ou toque numa grelha."
+                        hasStoredModel ->
+                            "Toque na superfície onde pretende colocar o modelo."
+                        else ->
+                            "Mova a câmara lentamente sobre uma superfície com textura até formar uma grelha e toque para ancorar."
+                    }
+                    Text(
+                        text = prompt,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (isSearchingSaved) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { autoRestoreStopped = true },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("Colocar num novo local")
+                        }
+                    }
                 }
-                Text(
-                    text = prompt,
-                    modifier = Modifier.padding(16.dp),
-                    style = MaterialTheme.typography.bodyMedium
-                )
             }
         } else if (isTrackingLost) {
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(24.dp),
+                    .padding(start = 24.dp, end = 92.dp, bottom = 24.dp),
                 shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                tonalElevation = 6.dp
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.60f),
+                tonalElevation = 0.dp
             ) {
                 Text(
                     text = "A relocalizar... Mova a câmara lentamente sobre a superfície ou toque no botão de atualizar acima para reposicionar.",
@@ -873,7 +906,145 @@ fun ARSceneScreen(
                 )
             }
         }
+
+        if (showSaveDialog) {
+            SaveEquationDialog(
+                initialExpression = uiState.equation.expression,
+                initialA = uiState.aInput.ifBlank { uiState.equation.a.toString() },
+                initialB = uiState.bInput.ifBlank { uiState.equation.b.toString() },
+                initialC = uiState.cInput.ifBlank { uiState.equation.c.toString() },
+                onDismiss = { showSaveDialog = false },
+                onSave = { name, expr, aStr, bStr, cStr ->
+                    val err = viewModel.saveEquationToDevice(
+                        name = name,
+                        expression = expr,
+                        aInput = aStr,
+                        bInput = bStr,
+                        cInput = cStr
+                    )
+                    if (err == null) {
+                        showSaveDialog = false
+                        Toast.makeText(context, "Equação guardada!", Toast.LENGTH_SHORT).show()
+                    }
+                    err
+                }
+            )
+        }
     }
+}
+
+@Composable
+private fun SaveEquationDialog(
+    initialExpression: String,
+    initialA: String,
+    initialB: String,
+    initialC: String,
+    onDismiss: () -> Unit,
+    onSave: (name: String, expression: String, a: String, b: String, c: String) -> String?
+) {
+    var name by remember { mutableStateOf("") }
+    var expression by remember { mutableStateOf(initialExpression) }
+    var aValue by remember { mutableStateOf(initialA) }
+    var bValue by remember { mutableStateOf(initialB) }
+    var cValue by remember { mutableStateOf(initialC) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.60f),
+        tonalElevation = 0.dp,
+        title = {
+            val dialogView = LocalView.current
+            SideEffect {
+                (dialogView.parent as? DialogWindowProvider)?.window?.setDimAmount(0.08f)
+            }
+            Text("Guardar Equação")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Nome (opcional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = expression,
+                    onValueChange = {
+                        expression = it
+                        errorMessage = null
+                    },
+                    label = { Text("Expressão z = f(x, y)") },
+                    isError = errorMessage != null,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = aValue,
+                        onValueChange = {
+                            aValue = it
+                            errorMessage = null
+                        },
+                        label = { Text("a") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = bValue,
+                        onValueChange = {
+                            bValue = it
+                            errorMessage = null
+                        },
+                        label = { Text("b") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = cValue,
+                        onValueChange = {
+                            cValue = it
+                            errorMessage = null
+                        },
+                        label = { Text("c") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                errorMessage?.let { err ->
+                    Text(
+                        text = err,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val err = onSave(name, expression, aValue, bValue, cValue)
+                    if (err != null) {
+                        errorMessage = err
+                    }
+                }
+            ) {
+                Text("Guardar")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar")
+            }
+        }
+    )
 }
 
 @Composable
@@ -1084,7 +1255,7 @@ private fun rotateVectorByInverseQuaternion(v: Float3, q: Quaternion): Float3 {
 
 /**
  * Custom Filament node holding a high-density double-sided continuous triangle mesh
- * so the 3D surface renders cleanly from both top and underside.
+ * in Filament's Y-up coordinate space (mathX -> worldX, mathY -> worldZ, mathZ = f(x, y) -> worldY).
  */
 private class SmoothSurfaceMeshNode(
     engine: Engine,
@@ -1118,29 +1289,29 @@ private fun buildSmoothEquationSurfaceNode(
         val worldX = -GRAPH_HALF_SPAN + ix * worldStep
         val mathX = (worldX / GRAPH_HALF_SPAN) * GRAPH_MATH_DOMAIN
 
-        for (iz in 0..gridSteps) {
-            val worldZ = -GRAPH_HALF_SPAN + iz * worldStep
-            val mathZ = (worldZ / GRAPH_HALF_SPAN) * GRAPH_MATH_DOMAIN
+        for (iy in 0..gridSteps) {
+            val worldZ = -GRAPH_HALF_SPAN + iy * worldStep
+            val mathY = (worldZ / GRAPH_HALF_SPAN) * GRAPH_MATH_DOMAIN
 
-            val rawMathY = runCatching {
+            val rawMathZ = runCatching {
                 MathExpressionEvaluator.evaluate(
                     expression = equation.expression,
                     x = mathX,
-                    z = mathZ,
+                    y = mathY,
                     a = equation.a,
                     b = equation.b,
                     c = equation.c
                 )
             }.getOrDefault(Double.NaN)
 
-            if (rawMathY.isFinite()) {
-                val clampedMathY = rawMathY.coerceIn(-1.8, 1.8).toFloat()
-                val worldY = GRAPH_BASE_ELEVATION + clampedMathY * GRAPH_VERTICAL_SCALE
-                mathHeights[ix][iz] = clampedMathY
-                worldPositions[ix][iz * 3] = worldX
-                worldPositions[ix][iz * 3 + 1] = worldY
-                worldPositions[ix][iz * 3 + 2] = worldZ
-                valid[ix][iz] = true
+            if (rawMathZ.isFinite()) {
+                val clampedMathZ = rawMathZ.coerceIn(-1.8, 1.8).toFloat()
+                val worldY = GRAPH_BASE_ELEVATION + clampedMathZ * GRAPH_VERTICAL_SCALE
+                mathHeights[ix][iy] = clampedMathZ
+                worldPositions[ix][iy * 3] = worldX
+                worldPositions[ix][iy * 3 + 1] = worldY
+                worldPositions[ix][iy * 3 + 2] = worldZ
+                valid[ix][iy] = true
             }
         }
     }
@@ -1152,41 +1323,41 @@ private fun buildSmoothEquationSurfaceNode(
 
     val normals = Array(cols) { FloatArray(cols * 3) }
     for (ix in 0..gridSteps) {
-        for (iz in 0..gridSteps) {
-            val py = worldPositions[ix][iz * 3 + 1]
+        for (iy in 0..gridSteps) {
+            val py = worldPositions[ix][iy * 3 + 1]
 
             val ixL = max(0, ix - 1)
             val ixR = min(gridSteps, ix + 1)
-            val izD = max(0, iz - 1)
-            val izU = min(gridSteps, iz + 1)
+            val iyD = max(0, iy - 1)
+            val iyU = min(gridSteps, iy + 1)
 
-            val yL = if (valid[ixL][iz]) worldPositions[ixL][iz * 3 + 1] else py
-            val yR = if (valid[ixR][iz]) worldPositions[ixR][iz * 3 + 1] else py
-            val yD = if (valid[ix][izD]) worldPositions[ix][izD * 3 + 1] else py
-            val yU = if (valid[ix][izU]) worldPositions[ix][izU * 3 + 1] else py
+            val yL = if (valid[ixL][iy]) worldPositions[ixL][iy * 3 + 1] else py
+            val yR = if (valid[ixR][iy]) worldPositions[ixR][iy * 3 + 1] else py
+            val yD = if (valid[ix][iyD]) worldPositions[ix][iyD * 3 + 1] else py
+            val yU = if (valid[ix][iyU]) worldPositions[ix][iyU * 3 + 1] else py
 
             val spanX = ((ixR - ixL) * worldStep).coerceAtLeast(1e-5f)
-            val spanZ = ((izU - izD) * worldStep).coerceAtLeast(1e-5f)
+            val spanZ = ((iyU - iyD) * worldStep).coerceAtLeast(1e-5f)
 
             val nx = -(yR - yL) * spanZ
             val ny = spanX * spanZ
             val nz = -(yU - yD) * spanX
             val nLen = sqrt(nx * nx + ny * ny + nz * nz).coerceAtLeast(1e-6f)
-            normals[ix][iz * 3] = nx / nLen
-            normals[ix][iz * 3 + 1] = ny / nLen
-            normals[ix][iz * 3 + 2] = nz / nLen
+            normals[ix][iy * 3] = nx / nLen
+            normals[ix][iy * 3 + 1] = ny / nLen
+            normals[ix][iy * 3 + 2] = nz / nLen
         }
     }
 
     // 1. Top surface vertices
     for (ix in 0..gridSteps) {
-        for (iz in 0..gridSteps) {
-            val px = worldPositions[ix][iz * 3]
-            val py = worldPositions[ix][iz * 3 + 1]
-            val pz = worldPositions[ix][iz * 3 + 2]
-            val nx = normals[ix][iz * 3]
-            val ny = normals[ix][iz * 3 + 1]
-            val nz = normals[ix][iz * 3 + 2]
+        for (iy in 0..gridSteps) {
+            val px = worldPositions[ix][iy * 3]
+            val py = worldPositions[ix][iy * 3 + 1]
+            val pz = worldPositions[ix][iy * 3 + 2]
+            val nx = normals[ix][iy * 3]
+            val ny = normals[ix][iy * 3 + 1]
+            val nz = normals[ix][iy * 3 + 2]
             val (qx, qy, qz, qw) = normalToTangentQuaternion(nx, ny, nz)
 
             floatView.put(px)
@@ -1202,13 +1373,13 @@ private fun buildSmoothEquationSurfaceNode(
     // 2. Underside surface vertices (0.6 mm shell thickness + outward-facing inverted normal)
     val shellThickness = 0.0006f
     for (ix in 0..gridSteps) {
-        for (iz in 0..gridSteps) {
-            val px = worldPositions[ix][iz * 3]
-            val py = worldPositions[ix][iz * 3 + 1] - shellThickness
-            val pz = worldPositions[ix][iz * 3 + 2]
-            val nx = -normals[ix][iz * 3]
-            val ny = -normals[ix][iz * 3 + 1]
-            val nz = -normals[ix][iz * 3 + 2]
+        for (iy in 0..gridSteps) {
+            val px = worldPositions[ix][iy * 3]
+            val py = worldPositions[ix][iy * 3 + 1] - shellThickness
+            val pz = worldPositions[ix][iy * 3 + 2]
+            val nx = -normals[ix][iy * 3]
+            val ny = -normals[ix][iy * 3 + 1]
+            val nz = -normals[ix][iy * 3 + 2]
             val (qx, qy, qz, qw) = normalToTangentQuaternion(nx, ny, nz)
 
             floatView.put(px)
@@ -1245,30 +1416,30 @@ private fun buildSmoothEquationSurfaceNode(
     val bandIndices = Array(5) { ArrayList<Int>(gridSteps * gridSteps * 4) }
 
     for (ix in 0 until gridSteps) {
-        for (iz in 0 until gridSteps) {
-            if (!valid[ix][iz] || !valid[ix + 1][iz] || !valid[ix][iz + 1] || !valid[ix + 1][iz + 1]) {
+        for (iy in 0 until gridSteps) {
+            if (!valid[ix][iy] || !valid[ix + 1][iy] || !valid[ix][iy + 1] || !valid[ix + 1][iy + 1]) {
                 continue
             }
 
-            val avgMathY = 0.25f * (
-                    mathHeights[ix][iz] +
-                            mathHeights[ix + 1][iz] +
-                            mathHeights[ix][iz + 1] +
-                            mathHeights[ix + 1][iz + 1]
+            val avgMathZ = 0.25f * (
+                    mathHeights[ix][iy] +
+                            mathHeights[ix + 1][iy] +
+                            mathHeights[ix][iy + 1] +
+                            mathHeights[ix + 1][iy + 1]
                     )
 
             val bandIdx = when {
-                avgMathY >= 0.65f -> 4
-                avgMathY >= 0.20f -> 3
-                avgMathY >= -0.20f -> 2
-                avgMathY >= -0.65f -> 1
+                avgMathZ >= 0.65f -> 4
+                avgMathZ >= 0.20f -> 3
+                avgMathZ >= -0.20f -> 2
+                avgMathZ >= -0.65f -> 1
                 else -> 0
             }
 
-            val i00 = ix * cols + iz
-            val i10 = (ix + 1) * cols + iz
-            val i01 = ix * cols + (iz + 1)
-            val i11 = (ix + 1) * cols + (iz + 1)
+            val i00 = ix * cols + iy
+            val i10 = (ix + 1) * cols + iy
+            val i01 = ix * cols + (iy + 1)
+            val i11 = (ix + 1) * cols + (iy + 1)
 
             val list = bandIndices[bandIdx]
 
@@ -1453,8 +1624,8 @@ private fun createEquation3DNode(
 
     val axisMaterial = materialLoader.createColorInstance(AndroidColor.parseColor("#FFFFFF"))
     val xAxisTipMat = materialLoader.createColorInstance(AndroidColor.parseColor("#FF5252"))
-    val zAxisTipMat = materialLoader.createColorInstance(AndroidColor.parseColor("#448AFF"))
-    val yAxisTipMat = materialLoader.createColorInstance(AndroidColor.parseColor("#69F0AE"))
+    val yAxisTipMat = materialLoader.createColorInstance(AndroidColor.parseColor("#448AFF"))
+    val zAxisTipMat = materialLoader.createColorInstance(AndroidColor.parseColor("#69F0AE"))
     val zeroPlaneMaterial = materialLoader.createColorInstance(AndroidColor.parseColor("#546E7A"))
 
     val maximaPoiMat = materialLoader.createColorInstance(AndroidColor.parseColor("#FFD600"))
@@ -1470,7 +1641,7 @@ private fun createEquation3DNode(
         rootNode.addChildNode(smoothSurfaceNode)
     }
 
-    // 2. X, Y, Z coordinate axes + colored axis tip markers
+    // 2. Mathematical X, Y (horizontal plane) and Z (vertical height) coordinate axes
     rootNode.addChildNode(
         CubeNode(engine, size = Size(0.42f, 0.0025f, 0.0025f), materialInstance = axisMaterial).apply {
             position = Position(0f, GRAPH_BASE_ELEVATION, 0f)
@@ -1488,7 +1659,7 @@ private fun createEquation3DNode(
         }
     )
     rootNode.addChildNode(
-        CubeNode(engine, size = Size(0.010f, 0.010f, 0.010f), materialInstance = zAxisTipMat).apply {
+        CubeNode(engine, size = Size(0.010f, 0.010f, 0.010f), materialInstance = yAxisTipMat).apply {
             position = Position(0f, GRAPH_BASE_ELEVATION, 0.215f)
         }
     )
@@ -1499,12 +1670,12 @@ private fun createEquation3DNode(
         }
     )
     rootNode.addChildNode(
-        CubeNode(engine, size = Size(0.010f, 0.010f, 0.010f), materialInstance = yAxisTipMat).apply {
+        CubeNode(engine, size = Size(0.010f, 0.010f, 0.010f), materialInstance = zAxisTipMat).apply {
             position = Position(0f, GRAPH_BASE_ELEVATION + 0.145f, 0f)
         }
     )
 
-    // 3. Subtle reference frame at y = 0 (zero plane)
+    // 3. Subtle reference frame at z = 0 (zero plane)
     val frameThickness = 0.0012f
     listOf(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN).forEach { edge ->
         rootNode.addChildNode(
@@ -1527,7 +1698,7 @@ private fun createEquation3DNode(
         )
     }
 
-    // 4. Sleek 3D Pins planted directly on the smooth surface
+    // 4. Sleek 3D Pins planted directly on the smooth surface (poi.x = mathX, poi.y = mathY, poi.z = mathZ)
     equation.pointsOfInterest.forEach { poi ->
         val shouldShow = when (poi.type) {
             PointType.MAXIMA -> showMaxima
@@ -1539,10 +1710,10 @@ private fun createEquation3DNode(
 
         val worldX = ((poi.x / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-        val worldZ = ((poi.z / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
+        val worldZ = ((poi.y / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-        val clampedMathY = poi.y.coerceIn(-1.8, 1.8).toFloat()
-        val surfaceY = GRAPH_BASE_ELEVATION + clampedMathY * GRAPH_VERTICAL_SCALE
+        val clampedMathZ = poi.z.coerceIn(-1.8, 1.8).toFloat()
+        val surfaceY = GRAPH_BASE_ELEVATION + clampedMathZ * GRAPH_VERTICAL_SCALE
 
         val poiMat = when (poi.type) {
             PointType.MAXIMA -> maximaPoiMat

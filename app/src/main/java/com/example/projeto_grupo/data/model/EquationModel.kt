@@ -10,8 +10,14 @@ data class EquationModel(
     val a: Double = 1.2,
     val b: Double = 3.0,
     val c: Double = 0.0,
+    val params: Map<String, Double> = mapOf("a" to 1.2, "b" to 3.0, "c" to 0.0),
     val pointsOfInterest: List<PointOfInterest> = emptyList()
-)
+) {
+    fun getEffectiveParams(): Map<String, Double> {
+        if (params.isNotEmpty()) return params
+        return mapOf("a" to a, "b" to b, "c" to c)
+    }
+}
 
 @Serializable
 data class PointOfInterest(
