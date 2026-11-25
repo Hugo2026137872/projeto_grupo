@@ -11,11 +11,16 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
@@ -25,23 +30,32 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import com.example.projeto_grupo.data.model.EquationModel
 import com.example.projeto_grupo.data.model.PointType
 import com.example.projeto_grupo.ui.EquationViewModel
 import com.example.projeto_grupo.ui.MathExpressionEvaluator
 import com.example.projeto_grupo.ui.MathFormulaView
+import com.example.projeto_grupo.ui.components.PlacementEquationDialog
+import com.example.projeto_grupo.ui.components.ScientificCalculatorKeyboard
+import com.example.projeto_grupo.ui.components.backspaceAtSelection
+import com.example.projeto_grupo.ui.components.insertTokenAtSelection
+import com.example.projeto_grupo.ui.components.moveSelectionCursor
 import com.google.android.filament.Box
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -102,12 +116,17 @@ private const val KEY_PLACED_AZIMUTH = "saved_placed_azimuth"
 // Shared 3D graph dimensions (Filament Y-up: mathX -> worldX, mathY -> worldZ, mathZ = f(x, y) -> worldY)
 private const val GRAPH_BASE_ELEVATION = 0.14f
 private const val GRAPH_HALF_SPAN = 0.18f
-private const val GRAPH_MATH_DOMAIN = 2.0
 private const val GRAPH_VERTICAL_SCALE = 0.075f
 
 private enum class AnnotationKind {
-    HEADER, AXIS, MAXIMA, MINIMA, ZERO
+    HEADER, AXIS, TICK_X, TICK_Y, TICK_Z, MAXIMA, MINIMA, ZERO
 }
+
+private data class PendingArPlacement(
+    val anchor: Anchor,
+    val hitPose: Pose,
+    val cameraPose: Pose
+)
 
 private data class ProjectedAnnotation(
     val id: String,
@@ -127,6 +146,7 @@ fun ARSceneScreen(
     val density = LocalDensity.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
     val uiState by viewModel.uiState.collectAsState()
+    val latestUiState by rememberUpdatedState(uiState)
 
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
@@ -213,6 +233,7 @@ fun ARSceneScreen(
     var isScaling by remember { mutableStateOf(false) }
     var lastPinchSpan by remember { mutableFloatStateOf(0f) }
     var showSaveDialog by remember { mutableStateOf(false) }
+    var pendingPlacement by remember { mutableStateOf<PendingArPlacement?>(null) }
 
     fun saveTransformOnly() {
         prefs.edit()
@@ -269,7 +290,11 @@ fun ARSceneScreen(
         hasStoredLocation = true
     }
 
-    fun attachModelToAnchor(anchor: Anchor, yawCompensationRad: Float = 0f) {
+    fun attachModelToAnchor(
+        anchor: Anchor,
+        yawCompensationRad: Float = 0f,
+        equation: EquationModel = uiState.equation
+    ) {
         anchorNodeRef?.detachAnchor()
         childNodes.clear()
 
@@ -289,10 +314,12 @@ fun ARSceneScreen(
         val equationNode = createEquation3DNode(
             engine = engine,
             materialLoader = materialLoader,
-            equation = uiState.equation,
+            equation = equation,
             showMaxima = uiState.showMaxima,
             showMinima = uiState.showMinima,
-            showZeros = uiState.showZeros
+            showZeros = uiState.showZeros,
+            xDomain = uiState.xDomain,
+            yDomain = uiState.yDomain
         ).apply {
             scale = Scale(targetScale)
             quaternion = adjustedQuat
@@ -311,13 +338,15 @@ fun ARSceneScreen(
         saveTransformOnly()
     }
 
-    // Live-rebuild the fluid 3D surface & POI pins whenever equation or AR UI toggles change
+    // Live-rebuild the fluid 3D surface & POI pins whenever equation, domain, or AR UI toggles change
     LaunchedEffect(
         modelPlaced,
         uiState.equation,
         uiState.showMaxima,
         uiState.showMinima,
-        uiState.showZeros
+        uiState.showZeros,
+        uiState.xDomain,
+        uiState.yDomain
     ) {
         val currentAnchorNode = anchorNodeRef
         if (modelPlaced && currentAnchorNode != null) {
@@ -331,7 +360,9 @@ fun ARSceneScreen(
                 equation = uiState.equation,
                 showMaxima = uiState.showMaxima,
                 showMinima = uiState.showMinima,
-                showZeros = uiState.showZeros
+                showZeros = uiState.showZeros,
+                xDomain = uiState.xDomain,
+                yDomain = uiState.yDomain
             ).apply {
                 scale = Scale(smoothScale)
                 quaternion = smoothQuaternion
@@ -497,13 +528,14 @@ fun ARSceneScreen(
                         )
                     }
 
-                    val nextAnnotations = ArrayList<ProjectedAnnotation>(24)
+                    val currentUi = latestUiState
+                    val nextAnnotations = ArrayList<ProjectedAnnotation>(48)
 
                     // Floating mathematical equation banner anchored directly above the vertical +Z axis
-                    projectLocal(Float3(0f, GRAPH_BASE_ELEVATION + 0.175f, 0f))?.let { (sx, sy) ->
+                    projectLocal(Float3(0f, GRAPH_BASE_ELEVATION + 0.195f, 0f))?.let { (sx, sy) ->
                         nextAnnotations += ProjectedAnnotation(
                             id = "eq_header",
-                            text = uiState.equation.expression,
+                            text = currentUi.equation.expression,
                             screenX = sx,
                             screenY = sy,
                             kind = AnnotationKind.HEADER
@@ -517,17 +549,57 @@ fun ARSceneScreen(
                     projectLocal(Float3(0f, GRAPH_BASE_ELEVATION, 0.23f))?.let { (sx, sy) ->
                         nextAnnotations += ProjectedAnnotation("axis_y", "+Y", null, sx, sy, AnnotationKind.AXIS)
                     }
-                    projectLocal(Float3(0f, GRAPH_BASE_ELEVATION + 0.145f, 0f))?.let { (sx, sy) ->
+                    projectLocal(Float3(0f, GRAPH_BASE_ELEVATION + 0.165f, 0f))?.let { (sx, sy) ->
                         nextAnnotations += ProjectedAnnotation("axis_z", "+Z", null, sx, sy, AnnotationKind.AXIS)
+                    }
+
+                    // Dynamic axis tick numbers for X, Y (controlled by sliders) and Z
+                    axisTickValues(currentUi.xDomain).forEach { value ->
+                        val localX = ((value / currentUi.xDomain) * GRAPH_HALF_SPAN).toFloat()
+                        projectLocal(Float3(localX, GRAPH_BASE_ELEVATION - 0.014f, 0f))?.let { (sx, sy) ->
+                            nextAnnotations += ProjectedAnnotation(
+                                id = "tick_x_$value",
+                                text = formatAxisNumber(value),
+                                screenX = sx,
+                                screenY = sy,
+                                kind = AnnotationKind.TICK_X
+                            )
+                        }
+                    }
+
+                    axisTickValues(currentUi.yDomain).forEach { value ->
+                        val localZ = ((value / currentUi.yDomain) * GRAPH_HALF_SPAN).toFloat()
+                        projectLocal(Float3(0f, GRAPH_BASE_ELEVATION - 0.014f, localZ))?.let { (sx, sy) ->
+                            nextAnnotations += ProjectedAnnotation(
+                                id = "tick_y_$value",
+                                text = formatAxisNumber(value),
+                                screenX = sx,
+                                screenY = sy,
+                                kind = AnnotationKind.TICK_Y
+                            )
+                        }
+                    }
+
+                    listOf(-2.0, -1.0, 1.0, 2.0).forEach { value ->
+                        val localY = GRAPH_BASE_ELEVATION + value.toFloat() * GRAPH_VERTICAL_SCALE
+                        projectLocal(Float3(0.016f, localY, 0f))?.let { (sx, sy) ->
+                            nextAnnotations += ProjectedAnnotation(
+                                id = "tick_z_$value",
+                                text = formatAxisNumber(value),
+                                screenX = sx,
+                                screenY = sy,
+                                kind = AnnotationKind.TICK_Z
+                            )
+                        }
                     }
 
                     // 3D POI pin callouts (poi.x = mathX, poi.y = mathY, poi.z = f(x, y))
                     var zeroCount = 0
-                    uiState.equation.pointsOfInterest.forEach { poi ->
+                    currentUi.equation.pointsOfInterest.forEach { poi ->
                         val kind = when (poi.type) {
-                            PointType.MAXIMA -> if (uiState.showMaxima) AnnotationKind.MAXIMA else null
-                            PointType.MINIMA -> if (uiState.showMinima) AnnotationKind.MINIMA else null
-                            PointType.ZERO -> if (uiState.showZeros && zeroCount < 8) {
+                            PointType.MAXIMA -> if (currentUi.showMaxima) AnnotationKind.MAXIMA else null
+                            PointType.MINIMA -> if (currentUi.showMinima) AnnotationKind.MINIMA else null
+                            PointType.ZERO -> if (currentUi.showZeros && zeroCount < 8) {
                                 zeroCount++
                                 AnnotationKind.ZERO
                             } else {
@@ -536,11 +608,11 @@ fun ARSceneScreen(
                             PointType.INFLECTION -> null
                         } ?: return@forEach
 
-                        val localX = ((poi.x / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
+                        val localX = ((poi.x / currentUi.xDomain) * GRAPH_HALF_SPAN)
                             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-                        val localZ = ((poi.y / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
+                        val localZ = ((poi.y / currentUi.yDomain) * GRAPH_HALF_SPAN)
                             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-                        val clampedMathZ = poi.z.coerceIn(-1.8, 1.8).toFloat()
+                        val clampedMathZ = poi.z.coerceIn(-2.0, 2.0).toFloat()
                         val pinHeight = if (kind == AnnotationKind.ZERO) 0.030f else 0.044f
                         val pinTopY = GRAPH_BASE_ELEVATION + clampedMathZ * GRAPH_VERTICAL_SCALE + pinHeight + 0.008f
 
@@ -568,7 +640,7 @@ fun ARSceneScreen(
             },
             onGestureListener = rememberOnGestureListener(
                 onSingleTapConfirmed = { motionEvent, _ ->
-                    if (!modelPlaced) {
+                    if (!modelPlaced && pendingPlacement == null) {
                         val currentFrame = frame ?: return@rememberOnGestureListener
                         val hitResult = currentFrame.hitTest(motionEvent.x, motionEvent.y)
                             .firstOrNull { hit ->
@@ -583,8 +655,11 @@ fun ARSceneScreen(
                         if (hitResult != null) {
                             val anchor = runCatching { hitResult.createAnchor() }.getOrNull()
                             if (anchor != null) {
-                                savePlacementSignature(hitResult.hitPose, currentFrame.camera.pose)
-                                attachModelToAnchor(anchor)
+                                pendingPlacement = PendingArPlacement(
+                                    anchor = anchor,
+                                    hitPose = hitResult.hitPose,
+                                    cameraPose = currentFrame.camera.pose
+                                )
                             }
                         }
                     }
@@ -701,29 +776,28 @@ fun ARSceneScreen(
                                     fontSize = 15.sp,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    MathFormulaView(
-                                        expression = uiState.aInput.ifBlank { uiState.equation.a.toString() },
-                                        prefix = "a = ",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    MathFormulaView(
-                                        expression = uiState.bInput.ifBlank { uiState.equation.b.toString() },
-                                        prefix = "b = ",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    MathFormulaView(
-                                        expression = uiState.cInput.ifBlank { uiState.equation.c.toString() },
-                                        prefix = "c = ",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
+                                val usedParams = remember(uiState.equation.expression) {
+                                    MathExpressionEvaluator.extractParameters(uiState.equation.expression)
+                                }
+                                val effectiveParams = uiState.equation.getEffectiveParams()
+                                if (usedParams.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        usedParams.forEach { param ->
+                                            val displayVal = uiState.paramsInput[param]?.ifBlank { null }
+                                                ?: (effectiveParams[param]?.toString() ?: "1.0")
+                                            MathFormulaView(
+                                                expression = displayVal,
+                                                prefix = "$param = ",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -748,6 +822,35 @@ fun ARSceneScreen(
                                 color = Color.White,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    AnnotationKind.TICK_X, AnnotationKind.TICK_Y, AnnotationKind.TICK_Z -> {
+                        val tickColor = when (ann.kind) {
+                            AnnotationKind.TICK_X -> Color(0xFFFF8A80)
+                            AnnotationKind.TICK_Y -> Color(0xFF82B1FF)
+                            else -> Color(0xFF69F0AE)
+                        }
+                        val halfW = with(density) { 10.dp.toPx() }
+                        val halfH = with(density) { 8.dp.toPx() }
+                        Box(
+                            modifier = Modifier
+                                .offset {
+                                    IntOffset(
+                                        x = (ann.screenX - halfW).roundToInt(),
+                                        y = (ann.screenY - halfH).roundToInt()
+                                    )
+                                }
+                                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = ann.text,
+                                color = tickColor,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
                             )
                         }
                     }
@@ -798,19 +901,29 @@ fun ARSceneScreen(
             }
         }
 
-        // Direct AR HUD toggles for Máximos, Mínimos & Zeros
+        // Direct AR HUD domain sliders & toggles for Máximos, Mínimos & Zeros
         if (modelPlaced && !isTrackingLost) {
-            ArPoiFilterBar(
-                showMaxima = uiState.showMaxima,
-                showMinima = uiState.showMinima,
-                showZeros = uiState.showZeros,
-                onToggleMaxima = { viewModel.toggleMaxima(!uiState.showMaxima) },
-                onToggleMinima = { viewModel.toggleMinima(!uiState.showMinima) },
-                onToggleZeros = { viewModel.toggleZeros(!uiState.showZeros) },
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = 16.dp, bottom = 28.dp, end = 92.dp)
-            )
+                    .padding(start = 16.dp, bottom = 24.dp, end = 92.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ArDomainSlidersCard(
+                    xDomain = uiState.xDomain,
+                    yDomain = uiState.yDomain,
+                    onXDomainChange = viewModel::updateXDomain,
+                    onYDomainChange = viewModel::updateYDomain
+                )
+                ArPoiFilterBar(
+                    showMaxima = uiState.showMaxima,
+                    showMinima = uiState.showMinima,
+                    showZeros = uiState.showZeros,
+                    onToggleMaxima = { viewModel.toggleMaxima(!uiState.showMaxima) },
+                    onToggleMinima = { viewModel.toggleMinima(!uiState.showMinima) },
+                    onToggleZeros = { viewModel.toggleZeros(!uiState.showZeros) }
+                )
+            }
         }
 
         Row(
@@ -907,20 +1020,44 @@ fun ARSceneScreen(
             }
         }
 
+        pendingPlacement?.let { placement ->
+            val matchingSavedId = uiState.savedEquations.firstOrNull { saved ->
+                saved.expression == uiState.equation.expression &&
+                    saved.getUsedParams() == uiState.equation.getEffectiveParams()
+            }?.id
+
+            PlacementEquationDialog(
+                savedEquations = uiState.savedEquations,
+                initialSelectedSavedId = matchingSavedId,
+                onDismiss = {
+                    placement.anchor.detach()
+                    pendingPlacement = null
+                },
+                onConfirmSaved = { saved ->
+                    val updatedEq = viewModel.applySavedEquation(saved)
+                    savePlacementSignature(placement.hitPose, placement.cameraPose)
+                    attachModelToAnchor(placement.anchor, equation = updatedEq)
+                    pendingPlacement = null
+                },
+                onConfirmNew = { expr, params ->
+                    val updatedEq = viewModel.applyCustomEquation(expr, params)
+                    savePlacementSignature(placement.hitPose, placement.cameraPose)
+                    attachModelToAnchor(placement.anchor, equation = updatedEq)
+                    pendingPlacement = null
+                }
+            )
+        }
+
         if (showSaveDialog) {
             SaveEquationDialog(
                 initialExpression = uiState.equation.expression,
-                initialA = uiState.aInput.ifBlank { uiState.equation.a.toString() },
-                initialB = uiState.bInput.ifBlank { uiState.equation.b.toString() },
-                initialC = uiState.cInput.ifBlank { uiState.equation.c.toString() },
+                initialParams = uiState.paramsInput,
                 onDismiss = { showSaveDialog = false },
-                onSave = { name, expr, aStr, bStr, cStr ->
+                onSave = { name, expr, params ->
                     val err = viewModel.saveEquationToDevice(
                         name = name,
                         expression = expr,
-                        aInput = aStr,
-                        bInput = bStr,
-                        cInput = cStr
+                        paramsInput = params
                     )
                     if (err == null) {
                         showSaveDialog = false
@@ -933,24 +1070,59 @@ fun ARSceneScreen(
     }
 }
 
+private const val SAVE_EXPR_FIELD_KEY = "__SAVE_EXPR__"
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SaveEquationDialog(
     initialExpression: String,
-    initialA: String,
-    initialB: String,
-    initialC: String,
+    initialParams: Map<String, String>,
     onDismiss: () -> Unit,
-    onSave: (name: String, expression: String, a: String, b: String, c: String) -> String?
+    onSave: (name: String, expression: String, params: Map<String, String>) -> String?
 ) {
     var name by remember { mutableStateOf("") }
-    var expression by remember { mutableStateOf(initialExpression) }
-    var aValue by remember { mutableStateOf(initialA) }
-    var bValue by remember { mutableStateOf(initialB) }
-    var cValue by remember { mutableStateOf(initialC) }
+    var expressionValue by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = initialExpression,
+                selection = TextRange(initialExpression.length)
+            )
+        )
+    }
+    val detectedParams = remember(expressionValue.text) {
+        MathExpressionEvaluator.extractParameters(expressionValue.text)
+    }
+    var paramValues by remember {
+        mutableStateOf(
+            initialParams.mapValues { (_, v) -> TextFieldValue(v, TextRange(v.length)) }
+        )
+    }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var activeCalcField by remember { mutableStateOf<String?>(null) }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(detectedParams) {
+        val updated = mutableMapOf<String, TextFieldValue>()
+        detectedParams.forEach { param ->
+            val defaultStr = initialParams[param] ?: if (param == "c") "0.0" else "1.0"
+            updated[param] = paramValues[param] ?: TextFieldValue(defaultStr, TextRange(defaultStr.length))
+        }
+        paramValues = updated
+        if (activeCalcField != null && activeCalcField != SAVE_EXPR_FIELD_KEY && activeCalcField !in detectedParams) {
+            activeCalcField = SAVE_EXPR_FIELD_KEY
+        }
+    }
+
+    LaunchedEffect(activeCalcField) {
+        if (activeCalcField != null) {
+            keyboardController?.hide()
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier.fillMaxWidth(0.94f),
         containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.60f),
         tonalElevation = 0.dp,
         title = {
@@ -961,63 +1133,155 @@ private fun SaveEquationDialog(
             Text("Guardar Equação")
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("Nome (opcional)") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                activeCalcField = null
+                            }
+                        }
                 )
+
+                val exprInteraction = remember { MutableInteractionSource() }
+                LaunchedEffect(exprInteraction) {
+                    exprInteraction.interactions.collect { interaction ->
+                        if (interaction is PressInteraction.Release) {
+                            activeCalcField = SAVE_EXPR_FIELD_KEY
+                            keyboardController?.hide()
+                        }
+                    }
+                }
+
                 OutlinedTextField(
-                    value = expression,
+                    value = expressionValue,
                     onValueChange = {
-                        expression = it
+                        expressionValue = it
                         errorMessage = null
                     },
+                    readOnly = true,
+                    interactionSource = exprInteraction,
                     label = { Text("Expressão z = f(x, y)") },
+                    trailingIcon = {
+                        IconButton(onClick = { activeCalcField = SAVE_EXPR_FIELD_KEY }) {
+                            Icon(
+                                imageVector = Icons.Default.Calculate,
+                                contentDescription = "Abrir teclado científico"
+                            )
+                        }
+                    },
                     isError = errorMessage != null,
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                activeCalcField = SAVE_EXPR_FIELD_KEY
+                                keyboardController?.hide()
+                            }
+                        }
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = aValue,
-                        onValueChange = {
-                            aValue = it
+
+                if (detectedParams.isNotEmpty()) {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        detectedParams.forEach { param ->
+                            val paramInteraction = remember(param) { MutableInteractionSource() }
+                            LaunchedEffect(paramInteraction, param) {
+                                paramInteraction.interactions.collect { interaction ->
+                                    if (interaction is PressInteraction.Release) {
+                                        activeCalcField = param
+                                        keyboardController?.hide()
+                                    }
+                                }
+                            }
+                            OutlinedTextField(
+                                value = paramValues[param] ?: TextFieldValue("1.0"),
+                                onValueChange = { updated ->
+                                    paramValues = paramValues.toMutableMap().apply { put(param, updated) }
+                                    errorMessage = null
+                                },
+                                readOnly = true,
+                                interactionSource = paramInteraction,
+                                label = { Text(param) },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .width(95.dp)
+                                    .onFocusChanged { focusState ->
+                                        if (focusState.isFocused) {
+                                            activeCalcField = param
+                                            keyboardController?.hide()
+                                        }
+                                    }
+                            )
+                        }
+                    }
+                }
+
+                activeCalcField?.let { targetField ->
+                    val isExpr = targetField == SAVE_EXPR_FIELD_KEY
+                    ScientificCalculatorKeyboard(
+                        targetLabel = if (isExpr) "Expressão z = f(x, y)" else "Parâmetro '$targetField'",
+                        isNumericOnly = !isExpr,
+                        onInsert = { token ->
                             errorMessage = null
+                            if (isExpr) {
+                                expressionValue = insertTokenAtSelection(expressionValue, token)
+                            } else {
+                                val curr = paramValues[targetField] ?: TextFieldValue("")
+                                paramValues = paramValues.toMutableMap().apply {
+                                    put(targetField, insertTokenAtSelection(curr, token))
+                                }
+                            }
                         },
-                        label = { Text("a") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = bValue,
-                        onValueChange = {
-                            bValue = it
+                        onBackspace = {
                             errorMessage = null
+                            if (isExpr) {
+                                expressionValue = backspaceAtSelection(expressionValue)
+                            } else {
+                                val curr = paramValues[targetField] ?: TextFieldValue("")
+                                paramValues = paramValues.toMutableMap().apply {
+                                    put(targetField, backspaceAtSelection(curr))
+                                }
+                            }
                         },
-                        label = { Text("b") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = cValue,
-                        onValueChange = {
-                            cValue = it
+                        onClear = {
                             errorMessage = null
+                            if (isExpr) {
+                                expressionValue = TextFieldValue("")
+                            } else {
+                                paramValues = paramValues.toMutableMap().apply {
+                                    put(targetField, TextFieldValue(""))
+                                }
+                            }
                         },
-                        label = { Text("c") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        onMoveCursor = { delta ->
+                            if (isExpr) {
+                                expressionValue = moveSelectionCursor(expressionValue, delta)
+                            } else {
+                                val curr = paramValues[targetField] ?: TextFieldValue("")
+                                paramValues = paramValues.toMutableMap().apply {
+                                    put(targetField, moveSelectionCursor(curr, delta))
+                                }
+                            }
+                        },
+                        onDismiss = { activeCalcField = null }
                     )
                 }
+
                 errorMessage?.let { err ->
                     Text(
                         text = err,
@@ -1030,7 +1294,10 @@ private fun SaveEquationDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val err = onSave(name, expression, aValue, bValue, cValue)
+                    val stringParams = detectedParams.associateWith { param ->
+                        paramValues[param]?.text ?: if (param == "c") "0.0" else "1.0"
+                    }
+                    val err = onSave(name, expressionValue.text, stringParams)
                     if (err != null) {
                         errorMessage = err
                     }
@@ -1045,6 +1312,74 @@ private fun SaveEquationDialog(
             }
         }
     )
+}
+
+@Composable
+private fun ArDomainSlidersCard(
+    xDomain: Double,
+    yDomain: Double,
+    onXDomainChange: (Double) -> Unit,
+    onYDomainChange: (Double) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0x9914171F),
+        tonalElevation = 0.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "X [±$xDomain]",
+                    color = Color(0xFFFF8A80),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.width(68.dp)
+                )
+                Slider(
+                    value = xDomain.toFloat(),
+                    onValueChange = { onXDomainChange(it.toDouble()) },
+                    valueRange = 0.5f..10.0f,
+                    steps = 18,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Y [±$yDomain]",
+                    color = Color(0xFF82B1FF),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.width(68.dp)
+                )
+                Slider(
+                    value = yDomain.toFloat(),
+                    onValueChange = { onYDomainChange(it.toDouble()) },
+                    valueRange = 0.5f..10.0f,
+                    steps = 18,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -1275,7 +1610,9 @@ private class SmoothSurfaceMeshNode(
 private fun buildSmoothEquationSurfaceNode(
     engine: Engine,
     materialLoader: io.github.sceneview.loaders.MaterialLoader,
-    equation: EquationModel
+    equation: EquationModel,
+    xDomain: Double,
+    yDomain: Double
 ): Node? {
     val gridSteps = 72
     val cols = gridSteps + 1
@@ -1287,25 +1624,23 @@ private fun buildSmoothEquationSurfaceNode(
 
     for (ix in 0..gridSteps) {
         val worldX = -GRAPH_HALF_SPAN + ix * worldStep
-        val mathX = (worldX / GRAPH_HALF_SPAN) * GRAPH_MATH_DOMAIN
+        val mathX = (worldX / GRAPH_HALF_SPAN) * xDomain
 
         for (iy in 0..gridSteps) {
             val worldZ = -GRAPH_HALF_SPAN + iy * worldStep
-            val mathY = (worldZ / GRAPH_HALF_SPAN) * GRAPH_MATH_DOMAIN
+            val mathY = (worldZ / GRAPH_HALF_SPAN) * yDomain
 
             val rawMathZ = runCatching {
                 MathExpressionEvaluator.evaluate(
                     expression = equation.expression,
                     x = mathX,
                     y = mathY,
-                    a = equation.a,
-                    b = equation.b,
-                    c = equation.c
+                    params = equation.getEffectiveParams()
                 )
             }.getOrDefault(Double.NaN)
 
             if (rawMathZ.isFinite()) {
-                val clampedMathZ = rawMathZ.coerceIn(-1.8, 1.8).toFloat()
+                val clampedMathZ = rawMathZ.coerceIn(-2.0, 2.0).toFloat()
                 val worldY = GRAPH_BASE_ELEVATION + clampedMathZ * GRAPH_VERTICAL_SCALE
                 mathHeights[ix][iy] = clampedMathZ
                 worldPositions[ix][iy * 3] = worldX
@@ -1518,7 +1853,7 @@ private fun buildSmoothEquationSurfaceNode(
                 GRAPH_BASE_ELEVATION,
                 0f,
                 GRAPH_HALF_SPAN + 0.05f,
-                0.28f,
+                0.32f,
                 GRAPH_HALF_SPAN + 0.05f
             )
         )
@@ -1616,7 +1951,9 @@ private fun createEquation3DNode(
     equation: EquationModel,
     showMaxima: Boolean,
     showMinima: Boolean,
-    showZeros: Boolean
+    showZeros: Boolean,
+    xDomain: Double,
+    yDomain: Double
 ): Node {
     val rootNode = Node(engine = engine).apply {
         isEditable = false
@@ -1636,7 +1973,9 @@ private fun createEquation3DNode(
     buildSmoothEquationSurfaceNode(
         engine = engine,
         materialLoader = materialLoader,
-        equation = equation
+        equation = equation,
+        xDomain = xDomain,
+        yDomain = yDomain
     )?.let { smoothSurfaceNode ->
         rootNode.addChildNode(smoothSurfaceNode)
     }
@@ -1665,15 +2004,55 @@ private fun createEquation3DNode(
     )
 
     rootNode.addChildNode(
-        CubeNode(engine, size = Size(0.0025f, 0.28f, 0.0025f), materialInstance = axisMaterial).apply {
+        CubeNode(engine, size = Size(0.0025f, 0.32f, 0.0025f), materialInstance = axisMaterial).apply {
             position = Position(0f, GRAPH_BASE_ELEVATION, 0f)
         }
     )
     rootNode.addChildNode(
         CubeNode(engine, size = Size(0.010f, 0.010f, 0.010f), materialInstance = zAxisTipMat).apply {
-            position = Position(0f, GRAPH_BASE_ELEVATION + 0.145f, 0f)
+            position = Position(0f, GRAPH_BASE_ELEVATION + 0.165f, 0f)
         }
     )
+
+    // 2b. Axis tick marks matching the current X/Y slider domains and Z range
+    axisTickValues(xDomain).forEach { value ->
+        val localX = ((value / xDomain) * GRAPH_HALF_SPAN).toFloat()
+        rootNode.addChildNode(
+            CubeNode(
+                engine,
+                size = Size(0.002f, 0.008f, 0.008f),
+                materialInstance = xAxisTipMat
+            ).apply {
+                position = Position(localX, GRAPH_BASE_ELEVATION, 0f)
+            }
+        )
+    }
+
+    axisTickValues(yDomain).forEach { value ->
+        val localZ = ((value / yDomain) * GRAPH_HALF_SPAN).toFloat()
+        rootNode.addChildNode(
+            CubeNode(
+                engine,
+                size = Size(0.008f, 0.008f, 0.002f),
+                materialInstance = yAxisTipMat
+            ).apply {
+                position = Position(0f, GRAPH_BASE_ELEVATION, localZ)
+            }
+        )
+    }
+
+    listOf(-2.0, -1.0, 1.0, 2.0).forEach { value ->
+        val localY = GRAPH_BASE_ELEVATION + value.toFloat() * GRAPH_VERTICAL_SCALE
+        rootNode.addChildNode(
+            CubeNode(
+                engine,
+                size = Size(0.008f, 0.002f, 0.008f),
+                materialInstance = zAxisTipMat
+            ).apply {
+                position = Position(0f, localY, 0f)
+            }
+        )
+    }
 
     // 3. Subtle reference frame at z = 0 (zero plane)
     val frameThickness = 0.0012f
@@ -1708,11 +2087,11 @@ private fun createEquation3DNode(
         }
         if (!shouldShow) return@forEach
 
-        val worldX = ((poi.x / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
+        val worldX = ((poi.x / xDomain) * GRAPH_HALF_SPAN)
             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-        val worldZ = ((poi.y / GRAPH_MATH_DOMAIN) * GRAPH_HALF_SPAN)
+        val worldZ = ((poi.y / yDomain) * GRAPH_HALF_SPAN)
             .toFloat().coerceIn(-GRAPH_HALF_SPAN, GRAPH_HALF_SPAN)
-        val clampedMathZ = poi.z.coerceIn(-1.8, 1.8).toFloat()
+        val clampedMathZ = poi.z.coerceIn(-2.0, 2.0).toFloat()
         val surfaceY = GRAPH_BASE_ELEVATION + clampedMathZ * GRAPH_VERTICAL_SCALE
 
         val poiMat = when (poi.type) {
@@ -1756,4 +2135,17 @@ private fun createEquation3DNode(
     }
 
     return rootNode
+}
+
+private fun axisTickValues(domain: Double): List<Double> {
+    val half = domain / 2.0
+    return listOf(-domain, -half, 0.0, half, domain)
+}
+
+private fun formatAxisNumber(value: Double): String {
+    return if (value == value.toLong().toDouble()) {
+        value.toLong().toString()
+    } else {
+        String.format(java.util.Locale.US, "%.1f", value)
+    }
 }

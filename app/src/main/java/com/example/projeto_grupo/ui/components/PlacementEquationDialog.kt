@@ -1,63 +1,102 @@
 package com.example.projeto_grupo.ui.components
 
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.projeto_grupo.ui.EquationPreset
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import com.example.projeto_grupo.data.local.SavedEquation
 import com.example.projeto_grupo.ui.MathExpressionEvaluator
 import com.example.projeto_grupo.ui.MathFormulaView
-import com.example.projeto_grupo.ui.defaultEquationPresets
 
 enum class PlacementOption {
-    DEFAULT,
+    SAVED_EQUATION,
     NEW_EQUATION
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+private const val EXPR_FIELD_KEY = "__EXPR__"
+
 @Composable
 fun PlacementEquationDialog(
-    currentExpression: String,
-    currentA: String,
-    currentB: String,
-    currentC: String,
-    presets: List<EquationPreset> = defaultEquationPresets,
+    savedEquations: List<SavedEquation>,
+    initialSelectedSavedId: String? = null,
     onDismiss: () -> Unit,
-    onConfirm: (isDefault: Boolean, expression: String, a: String, b: String, c: String) -> Unit
+    onConfirmSaved: (SavedEquation) -> Unit,
+    onConfirmNew: (expression: String, params: Map<String, Double>) -> Unit
 ) {
-    var selectedOption by remember { mutableStateOf(PlacementOption.DEFAULT) }
-
-    var expressionInput by remember { mutableStateOf(currentExpression) }
-    var paramValues by remember {
-        mutableStateOf(mapOf("a" to currentA, "b" to currentB, "c" to currentC))
+    val hasSaved = savedEquations.isNotEmpty()
+    var selectedOption by remember(hasSaved) {
+        mutableStateOf(
+            if (hasSaved) PlacementOption.SAVED_EQUATION else PlacementOption.NEW_EQUATION
+        )
     }
-    var validationError by remember { mutableStateOf<String?>(null) }
+    var selectedSavedId by remember(savedEquations, initialSelectedSavedId) {
+        mutableStateOf(
+            savedEquations.firstOrNull { it.id == initialSelectedSavedId }?.id
+                ?: savedEquations.firstOrNull()?.id
+        )
+    }
 
-    val detectedParams = remember(expressionInput) {
-        MathExpressionEvaluator.extractParameters(expressionInput)
+    var expressionValue by remember { mutableStateOf(TextFieldValue("")) }
+    var paramValues by remember { mutableStateOf(emptyMap<String, TextFieldValue>()) }
+    var validationError by remember { mutableStateOf<String?>(null) }
+    var activeCalcField by remember {
+        mutableStateOf<String?>(if (!hasSaved) EXPR_FIELD_KEY else null)
+    }
+
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val detectedParams = remember(expressionValue.text) {
+        MathExpressionEvaluator.extractParameters(expressionValue.text)
     }
 
     LaunchedEffect(detectedParams) {
-        val updated = mutableMapOf<String, String>()
+        val updated = mutableMapOf<String, TextFieldValue>()
         detectedParams.forEach { param ->
-            updated[param] = paramValues[param] ?: "1.0"
+            val defaultStr = if (param == "c") "0.0" else "1.0"
+            updated[param] = paramValues[param] ?: TextFieldValue(defaultStr, TextRange(defaultStr.length))
         }
         paramValues = updated
+        if (activeCalcField != null && activeCalcField != EXPR_FIELD_KEY && activeCalcField !in detectedParams) {
+            activeCalcField = EXPR_FIELD_KEY
+        }
+    }
+
+    LaunchedEffect(activeCalcField) {
+        if (activeCalcField != null) {
+            keyboardController?.hide()
+        }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier.fillMaxWidth(0.94f),
+        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.68f),
+        tonalElevation = 0.dp,
         title = {
+            val dialogView = LocalView.current
+            SideEffect {
+                (dialogView.parent as? DialogWindowProvider)?.window?.setDimAmount(0.08f)
+            }
             Text(
-                text = "Posicionar Equação em RA",
+                text = if (hasSaved) "Posicionar Equação em RA" else "Nova Equação em RA",
                 style = MaterialTheme.typography.titleLarge
             )
         },
@@ -67,128 +106,207 @@ fun PlacementEquationDialog(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(
-                    text = "Escolha como deseja posicionar a equação na superfície detectada:",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-
-                Column(
-                    modifier = Modifier.selectableGroup(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // Option 1: Default
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (selectedOption == PlacementOption.DEFAULT)
-                                MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surfaceVariant
-                        ),
-                        onClick = { selectedOption = PlacementOption.DEFAULT },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = selectedOption == PlacementOption.DEFAULT,
-                                onClick = { selectedOption = PlacementOption.DEFAULT }
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Usar Equação Padrão",
-                                    style = MaterialTheme.typography.titleSmall
-                                )
-                                Text(
-                                    text = "Onda Circular (Ripple)",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
-                    }
-
-                    // Option 2: New Equation
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (selectedOption == PlacementOption.NEW_EQUATION)
-                                MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surfaceVariant
-                        ),
-                        onClick = { selectedOption = PlacementOption.NEW_EQUATION },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = selectedOption == PlacementOption.NEW_EQUATION,
-                                onClick = { selectedOption = PlacementOption.NEW_EQUATION }
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Criar Nova Equação",
-                                    style = MaterialTheme.typography.titleSmall
-                                )
-                                Text(
-                                    text = "Inserir texto no input ou escolher preset",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (selectedOption == PlacementOption.NEW_EQUATION) {
-                    HorizontalDivider()
-
+                if (hasSaved) {
                     Text(
-                        text = "Predefinições Rápidas:",
-                        style = MaterialTheme.typography.labelMedium
+                        text = "Pretende usar uma equação guardada ou criar uma nova?",
+                        style = MaterialTheme.typography.bodyMedium
                     )
 
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Column(
+                        modifier = Modifier.selectableGroup(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        presets.forEach { preset ->
-                            FilterChip(
-                                selected = expressionInput == preset.expression,
-                                onClick = {
-                                    expressionInput = preset.expression
-                                    paramValues = mapOf(
-                                        "a" to preset.a.toString(),
-                                        "b" to preset.b.toString(),
-                                        "c" to preset.c.toString()
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selectedOption == PlacementOption.SAVED_EQUATION)
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.50f)
+                            ),
+                            onClick = {
+                                selectedOption = PlacementOption.SAVED_EQUATION
+                                activeCalcField = null
+                                validationError = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = selectedOption == PlacementOption.SAVED_EQUATION,
+                                    onClick = {
+                                        selectedOption = PlacementOption.SAVED_EQUATION
+                                        activeCalcField = null
+                                        validationError = null
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Usar Equação Guardada",
+                                        style = MaterialTheme.typography.titleSmall
                                     )
-                                    validationError = null
-                                },
-                                label = { Text(preset.name) }
-                            )
+                                    Text(
+                                        text = "${savedEquations.size} disponível(eis)",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selectedOption == PlacementOption.NEW_EQUATION)
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.50f)
+                            ),
+                            onClick = {
+                                selectedOption = PlacementOption.NEW_EQUATION
+                                activeCalcField = EXPR_FIELD_KEY
+                                validationError = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = selectedOption == PlacementOption.NEW_EQUATION,
+                                    onClick = {
+                                        selectedOption = PlacementOption.NEW_EQUATION
+                                        activeCalcField = EXPR_FIELD_KEY
+                                        validationError = null
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Criar Nova Equação",
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Text(
+                                        text = "Inserir nova expressão matemática",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "Insira a expressão da nova equação para posicionar em RA:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
+                if (hasSaved && selectedOption == PlacementOption.SAVED_EQUATION) {
+                    HorizontalDivider()
+                    Text(
+                        text = "Selecione uma equação guardada:",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        savedEquations.forEach { saved ->
+                            val isSelected = saved.id == selectedSavedId
+                            val usedParams = saved.getUsedParams()
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isSelected)
+                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                ),
+                                onClick = { selectedSavedId = saved.id },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { selectedSavedId = saved.id }
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = saved.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "z = ${saved.expression}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (usedParams.isNotEmpty()) {
+                                            Text(
+                                                text = usedParams.entries.joinToString(", ") { "${it.key} = ${it.value}" },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (hasSaved) {
+                        HorizontalDivider()
+                    }
+
+                    val exprInteraction = remember { MutableInteractionSource() }
+                    LaunchedEffect(exprInteraction) {
+                        exprInteraction.interactions.collect { interaction ->
+                            if (interaction is PressInteraction.Release) {
+                                activeCalcField = EXPR_FIELD_KEY
+                                keyboardController?.hide()
+                            }
                         }
                     }
 
                     OutlinedTextField(
-                        value = expressionInput,
+                        value = expressionValue,
                         onValueChange = {
-                            expressionInput = it
+                            expressionValue = it
                             validationError = null
                         },
+                        readOnly = true,
+                        interactionSource = exprInteraction,
                         label = { Text("Expressão z = f(x, y)") },
+                        placeholder = { Text("Ex: a * sin(b * x) * cos(b * y) + c") },
+                        trailingIcon = {
+                            IconButton(onClick = { activeCalcField = EXPR_FIELD_KEY }) {
+                                Icon(
+                                    imageVector = Icons.Default.Calculate,
+                                    contentDescription = "Abrir teclado científico"
+                                )
+                            }
+                        },
                         isError = validationError != null,
                         supportingText = validationError?.let { err -> { Text(err) } },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused) {
+                                    activeCalcField = EXPR_FIELD_KEY
+                                    keyboardController?.hide()
+                                }
+                            }
                     )
 
                     if (detectedParams.isNotEmpty()) {
@@ -202,60 +320,131 @@ fun PlacementEquationDialog(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             detectedParams.forEach { param ->
+                                val paramInteraction = remember(param) { MutableInteractionSource() }
+                                LaunchedEffect(paramInteraction, param) {
+                                    paramInteraction.interactions.collect { interaction ->
+                                        if (interaction is PressInteraction.Release) {
+                                            activeCalcField = param
+                                            keyboardController?.hide()
+                                        }
+                                    }
+                                }
                                 OutlinedTextField(
-                                    value = paramValues[param] ?: "1.0",
+                                    value = paramValues[param] ?: TextFieldValue("1.0"),
                                     onValueChange = { newVal ->
                                         paramValues = paramValues.toMutableMap().apply { put(param, newVal) }
+                                        validationError = null
                                     },
+                                    readOnly = true,
+                                    interactionSource = paramInteraction,
                                     label = { Text(param) },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
-                                    modifier = Modifier.width(90.dp)
+                                    modifier = Modifier
+                                        .width(95.dp)
+                                        .onFocusChanged { focusState ->
+                                            if (focusState.isFocused) {
+                                                activeCalcField = param
+                                                keyboardController?.hide()
+                                            }
+                                        }
                                 )
                             }
                         }
                     }
 
-                    Text(
-                        text = "Pré-visualização:",
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    MathFormulaView(
-                        expression = expressionInput,
-                        prefix = "z = f(x, y) = ",
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    if (expressionValue.text.isNotBlank()) {
+                        Text(
+                            text = "Pré-visualização:",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        MathFormulaView(
+                            expression = expressionValue.text,
+                            prefix = "z = f(x, y) = ",
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    activeCalcField?.let { targetField ->
+                        val isExpr = targetField == EXPR_FIELD_KEY
+                        ScientificCalculatorKeyboard(
+                            targetLabel = if (isExpr) "Expressão z = f(x, y)" else "Parâmetro '$targetField'",
+                            isNumericOnly = !isExpr,
+                            onInsert = { token ->
+                                validationError = null
+                                if (isExpr) {
+                                    expressionValue = insertTokenAtSelection(expressionValue, token)
+                                } else {
+                                    val curr = paramValues[targetField] ?: TextFieldValue("")
+                                    paramValues = paramValues.toMutableMap().apply {
+                                        put(targetField, insertTokenAtSelection(curr, token))
+                                    }
+                                }
+                            },
+                            onBackspace = {
+                                validationError = null
+                                if (isExpr) {
+                                    expressionValue = backspaceAtSelection(expressionValue)
+                                } else {
+                                    val curr = paramValues[targetField] ?: TextFieldValue("")
+                                    paramValues = paramValues.toMutableMap().apply {
+                                        put(targetField, backspaceAtSelection(curr))
+                                    }
+                                }
+                            },
+                            onClear = {
+                                validationError = null
+                                if (isExpr) {
+                                    expressionValue = TextFieldValue("")
+                                } else {
+                                    paramValues = paramValues.toMutableMap().apply {
+                                        put(targetField, TextFieldValue(""))
+                                    }
+                                }
+                            },
+                            onMoveCursor = { delta ->
+                                if (isExpr) {
+                                    expressionValue = moveSelectionCursor(expressionValue, delta)
+                                } else {
+                                    val curr = paramValues[targetField] ?: TextFieldValue("")
+                                    paramValues = paramValues.toMutableMap().apply {
+                                        put(targetField, moveSelectionCursor(curr, delta))
+                                    }
+                                }
+                            },
+                            onDismiss = { activeCalcField = null }
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    if (selectedOption == PlacementOption.DEFAULT) {
-                        val defaultPreset = presets.firstOrNull() ?: defaultEquationPresets.first()
-                        onConfirm(
-                            true,
-                            defaultPreset.expression,
-                            defaultPreset.a.toString(),
-                            defaultPreset.b.toString(),
-                            defaultPreset.c.toString()
-                        )
+                    if (hasSaved && selectedOption == PlacementOption.SAVED_EQUATION) {
+                        val chosen = savedEquations.firstOrNull { it.id == selectedSavedId }
+                            ?: savedEquations.first()
+                        onConfirmSaved(chosen)
                     } else {
-                        val parsed = paramValues.mapValues { (_, raw) ->
-                            raw.trim().toDoubleOrNull()
+                        val parsed = mutableMapOf<String, Double>()
+                        for (param in detectedParams) {
+                            val raw = paramValues[param]?.text ?: if (param == "c") "0.0" else "1.0"
+                            val value = raw.trim().toDoubleOrNull()
                                 ?: runCatching {
                                     MathExpressionEvaluator.evaluate(raw, 0.0, 0.0, emptyMap())
                                 }.getOrNull()?.takeIf { it.isFinite() }
-                                ?: 1.0
+                            if (value == null) {
+                                validationError = "Valor inválido para '$param'."
+                                return@Button
+                            }
+                            parsed[param] = value
                         }
-                        val err = MathExpressionEvaluator.validate(expressionInput, parsed)
+
+                        val expr = expressionValue.text.trim()
+                        val err = MathExpressionEvaluator.validate(expr, parsed)
                         if (err != null) {
                             validationError = err
                         } else {
-                            val a = paramValues["a"] ?: "1.0"
-                            val b = paramValues["b"] ?: "1.0"
-                            val c = paramValues["c"] ?: "0.0"
-                            onConfirm(false, expressionInput, a, b, c)
+                            onConfirmNew(expr, parsed)
                         }
                     }
                 }

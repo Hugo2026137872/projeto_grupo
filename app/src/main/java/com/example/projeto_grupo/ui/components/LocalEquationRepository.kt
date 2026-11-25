@@ -1,6 +1,7 @@
 package com.example.projeto_grupo.data.local
 
 import android.content.Context
+import com.example.projeto_grupo.ui.MathExpressionEvaluator
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -9,22 +10,42 @@ data class SavedEquation(
     val id: String,
     val name: String,
     val expression: String,
-    val a: Double,
-    val b: Double,
-    val c: Double,
+    val params: Map<String, Double> = emptyMap(),
+    val a: Double = 1.0,
+    val b: Double = 1.0,
+    val c: Double = 0.0,
     val updatedAt: Long = System.currentTimeMillis()
-)
+) {
+    fun getUsedParams(): Map<String, Double> {
+        val usedNames = MathExpressionEvaluator.extractParameters(expression)
+        if (usedNames.isEmpty()) return emptyMap()
+        return usedNames.associateWith { param ->
+            params[param] ?: when (param) {
+                "a" -> a
+                "b" -> b
+                "c" -> c
+                else -> 1.0
+            }
+        }
+    }
+}
 
 class LocalEquationRepository(context: Context) {
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    fun saveActiveEquation(expression: String, a: Double, b: Double, c: Double) {
+    fun saveActiveEquation(expression: String, params: Map<String, Double>) {
+        val usedNames = MathExpressionEvaluator.extractParameters(expression)
+        val filteredParams = usedNames.associateWith { key ->
+            params[key] ?: if (key == "c") 0.0 else 1.0
+        }
         val json = JSONObject().apply {
             put("expression", expression)
-            put("a", a)
-            put("b", b)
-            put("c", c)
+            if (filteredParams.isNotEmpty()) {
+                val paramsJson = JSONObject()
+                filteredParams.forEach { (k, v) -> paramsJson.put(k, v) }
+                put("params", paramsJson)
+            }
         }
         prefs.edit().putString(KEY_ACTIVE_EQUATION, json.toString()).apply()
     }
@@ -35,13 +56,15 @@ class LocalEquationRepository(context: Context) {
             val obj = JSONObject(raw)
             val expr = obj.getString("expression")
             if (expr.isBlank()) return null
+            val parsedParams = parseParamsFromJson(obj, expr)
             SavedEquation(
                 id = "active",
                 name = "Ativa",
                 expression = expr,
-                a = obj.optDouble("a", 1.0),
-                b = obj.optDouble("b", 1.0),
-                c = obj.optDouble("c", 0.0)
+                params = parsedParams,
+                a = parsedParams["a"] ?: 1.0,
+                b = parsedParams["b"] ?: 1.0,
+                c = parsedParams["c"] ?: 0.0
             )
         }.getOrNull()
     }
@@ -53,13 +76,16 @@ class LocalEquationRepository(context: Context) {
             val list = ArrayList<SavedEquation>(array.length())
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
+                val expr = obj.getString("expression")
+                val parsedParams = parseParamsFromJson(obj, expr)
                 list += SavedEquation(
                     id = obj.getString("id"),
                     name = obj.optString("name", "Equação ${i + 1}"),
-                    expression = obj.getString("expression"),
-                    a = obj.optDouble("a", 1.0),
-                    b = obj.optDouble("b", 1.0),
-                    c = obj.optDouble("c", 0.0),
+                    expression = expr,
+                    params = parsedParams,
+                    a = parsedParams["a"] ?: 1.0,
+                    b = parsedParams["b"] ?: 1.0,
+                    c = parsedParams["c"] ?: 0.0,
                     updatedAt = obj.optLong("updatedAt", 0L)
                 )
             }
@@ -70,26 +96,28 @@ class LocalEquationRepository(context: Context) {
     fun saveEquation(
         name: String,
         expression: String,
-        a: Double,
-        b: Double,
-        c: Double
+        params: Map<String, Double>
     ): List<SavedEquation> {
         val current = getSavedEquations().toMutableList()
         val cleanName = name.trim().ifEmpty { "Equação #${current.size + 1}" }
+        val usedNames = MathExpressionEvaluator.extractParameters(expression)
+        val filteredParams = usedNames.associateWith { key ->
+            params[key] ?: if (key == "c") 0.0 else 1.0
+        }
 
-        // Update existing entry if an identical name or identical formula+params already exists
         val existingIndex = current.indexOfFirst {
             it.name.equals(cleanName, ignoreCase = true) ||
-                    (it.expression == expression && it.a == a && it.b == b && it.c == c)
+                    (it.expression == expression && it.getUsedParams() == filteredParams)
         }
 
         val entry = SavedEquation(
             id = if (existingIndex >= 0) current[existingIndex].id else UUID.randomUUID().toString(),
             name = cleanName,
             expression = expression,
-            a = a,
-            b = b,
-            c = c,
+            params = filteredParams,
+            a = filteredParams["a"] ?: 1.0,
+            b = filteredParams["b"] ?: 1.0,
+            c = filteredParams["c"] ?: 0.0,
             updatedAt = System.currentTimeMillis()
         )
 
@@ -100,7 +128,7 @@ class LocalEquationRepository(context: Context) {
         }
 
         persistList(current)
-        saveActiveEquation(expression, a, b, c)
+        saveActiveEquation(expression, filteredParams)
         return current.sortedByDescending { it.updatedAt }
     }
 
@@ -110,17 +138,43 @@ class LocalEquationRepository(context: Context) {
         return updated
     }
 
+    private fun parseParamsFromJson(obj: JSONObject, expression: String): Map<String, Double> {
+        val usedNames = MathExpressionEvaluator.extractParameters(expression)
+        if (usedNames.isEmpty()) return emptyMap()
+
+        val paramsObj = obj.optJSONObject("params")
+        if (paramsObj != null) {
+            return usedNames.associateWith { key ->
+                if (paramsObj.has(key)) paramsObj.optDouble(key, if (key == "c") 0.0 else 1.0)
+                else if (key == "c") 0.0 else 1.0
+            }
+        }
+
+        // Fallback for legacy entries saved before dynamic params map
+        return usedNames.associateWith { key ->
+            when (key) {
+                "a" -> obj.optDouble("a", 1.0)
+                "b" -> obj.optDouble("b", 1.0)
+                "c" -> obj.optDouble("c", 0.0)
+                else -> 1.0
+            }
+        }
+    }
+
     private fun persistList(list: List<SavedEquation>) {
         val array = JSONArray()
         list.forEach { item ->
+            val usedParams = item.getUsedParams()
             array.put(
                 JSONObject().apply {
                     put("id", item.id)
                     put("name", item.name)
                     put("expression", item.expression)
-                    put("a", item.a)
-                    put("b", item.b)
-                    put("c", item.c)
+                    if (usedParams.isNotEmpty()) {
+                        val paramsJson = JSONObject()
+                        usedParams.forEach { (k, v) -> paramsJson.put(k, v) }
+                        put("params", paramsJson)
+                    }
                     put("updatedAt", item.updatedAt)
                 }
             )

@@ -133,11 +133,10 @@ fun HomeScreen(
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val usedParams = saved.getUsedParams()
                         EquationGraphPreview(
                             expression = saved.expression,
-                            a = saved.a,
-                            b = saved.b,
-                            c = saved.c,
+                            params = usedParams,
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(RoundedCornerShape(8.dp))
@@ -159,12 +158,14 @@ fun HomeScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "a = ${saved.a}, b = ${saved.b}, c = ${saved.c}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            if (usedParams.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = usedParams.entries.joinToString(", ") { "${it.key} = ${it.value}" },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
 
                         IconButton(onClick = { viewModel.deleteSavedEquation(saved.id) }) {

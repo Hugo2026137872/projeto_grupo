@@ -87,19 +87,26 @@ object MathExpressionEvaluator {
         validate(expression, mapOf("a" to a, "b" to b, "c" to c))
 
     /**
-     * Computes Points of Interest for z = f(x, y) on [-2, 2] x [-2, 2].
+     * Computes Points of Interest for z = f(x, y) on [-xDomain, xDomain] x [-yDomain, yDomain].
      * PointOfInterest stores (x = mathX, y = mathY, z = f(x, y)).
      */
     fun computePointsOfInterest(
         expression: String,
-        params: Map<String, Double>
+        params: Map<String, Double>,
+        xDomain: Double = 2.0,
+        yDomain: Double = 2.0
     ): List<PointOfInterest> {
-        val minCoord = -2.0
-        val maxCoord = 2.0
+        val minX = -xDomain
+        val maxX = xDomain
+        val minY = -yDomain
+        val maxY = yDomain
         val eps = 1e-7
+        val minDist1D = (xDomain * 0.125).coerceAtLeast(0.08)
+        val minDist2D = (maxOf(xDomain, yDomain) * 0.18).coerceAtLeast(0.12)
+        val minDistZero2D = (maxOf(xDomain, yDomain) * 0.22).coerceAtLeast(0.15)
 
-        val yTest1 = runCatching { evaluate(expression, 0.35, -0.8, params) }.getOrDefault(0.0)
-        val yTest2 = runCatching { evaluate(expression, 0.35, 0.8, params) }.getOrDefault(0.0)
+        val yTest1 = runCatching { evaluate(expression, xDomain * 0.175, -yDomain * 0.4, params) }.getOrDefault(0.0)
+        val yTest2 = runCatching { evaluate(expression, xDomain * 0.175, yDomain * 0.4, params) }.getOrDefault(0.0)
         val variesInY = abs(yTest1 - yTest2) > 1e-6
 
         val maxima = mutableListOf<PointOfInterest>()
@@ -109,9 +116,9 @@ object MathExpressionEvaluator {
 
         if (!variesInY) {
             val steps = 160
-            val stepSize = (maxCoord - minCoord) / steps
+            val stepSize = (maxX - minX) / steps
             val values = DoubleArray(steps + 1) { ix ->
-                val x = minCoord + ix * stepSize
+                val x = minX + ix * stepSize
                 runCatching { evaluate(expression, x, 0.0, params) }.getOrDefault(Double.NaN)
             }
 
@@ -129,7 +136,7 @@ object MathExpressionEvaluator {
                 val next = values[ix + 1]
                 if (!prev.isFinite() || !curr.isFinite() || !next.isFinite()) continue
 
-                val x = minCoord + ix * stepSize
+                val x = minX + ix * stepSize
 
                 if (curr >= prev - eps && curr >= next - eps &&
                     (curr > prev + eps || curr > next + eps)
@@ -142,7 +149,7 @@ object MathExpressionEvaluator {
                 }
 
                 if ((abs(curr) < 0.035 || (prev > 0.0 && curr < 0.0) || (prev < 0.0 && curr > 0.0)) &&
-                    isFarEnough(zeros, x, 0.0, 0.25)
+                    isFarEnough(zeros, x, 0.0, minDist1D)
                 ) {
                     zeros += PointOfInterest(
                         id = "poi_${idCounter++}",
@@ -157,7 +164,7 @@ object MathExpressionEvaluator {
 
             interiorMaxCandidates.sortByDescending { it.z }
             for (cand in interiorMaxCandidates) {
-                if (isFarEnough(maxima, cand.x, cand.y, 0.25)) {
+                if (isFarEnough(maxima, cand.x, cand.y, minDist1D)) {
                     maxima += PointOfInterest(
                         id = "poi_${idCounter++}",
                         type = PointType.MAXIMA,
@@ -171,7 +178,7 @@ object MathExpressionEvaluator {
 
             interiorMinCandidates.sortBy { it.z }
             for (cand in interiorMinCandidates) {
-                if (isFarEnough(minima, cand.x, cand.y, 0.25)) {
+                if (isFarEnough(minima, cand.x, cand.y, minDist1D)) {
                     minima += PointOfInterest(
                         id = "poi_${idCounter++}",
                         type = PointType.MINIMA,
@@ -188,16 +195,16 @@ object MathExpressionEvaluator {
 
             if (values[0].isFinite() && values[1].isFinite()) {
                 if (values[0] > values[1] + eps) {
-                    boundaryMaxCandidates += RawExtremum(minCoord, 0.0, values[0], isBoundary = true)
+                    boundaryMaxCandidates += RawExtremum(minX, 0.0, values[0], isBoundary = true)
                 } else if (values[0] < values[1] - eps) {
-                    boundaryMinCandidates += RawExtremum(minCoord, 0.0, values[0], isBoundary = true)
+                    boundaryMinCandidates += RawExtremum(minX, 0.0, values[0], isBoundary = true)
                 }
             }
             if (values[steps].isFinite() && values[steps - 1].isFinite()) {
                 if (values[steps] > values[steps - 1] + eps) {
-                    boundaryMaxCandidates += RawExtremum(maxCoord, 0.0, values[steps], isBoundary = true)
+                    boundaryMaxCandidates += RawExtremum(maxX, 0.0, values[steps], isBoundary = true)
                 } else if (values[steps] < values[steps - 1] - eps) {
-                    boundaryMinCandidates += RawExtremum(maxCoord, 0.0, values[steps], isBoundary = true)
+                    boundaryMinCandidates += RawExtremum(maxX, 0.0, values[steps], isBoundary = true)
                 }
             }
 
@@ -205,7 +212,7 @@ object MathExpressionEvaluator {
             boundaryMaxCandidates.sortByDescending { it.z }
             for (cand in boundaryMaxCandidates) {
                 if ((maxima.isEmpty() || cand.z > bestInteriorMaxZ + eps) &&
-                    isFarEnough(maxima, cand.x, cand.y, 0.25)
+                    isFarEnough(maxima, cand.x, cand.y, minDist1D)
                 ) {
                     maxima += PointOfInterest(
                         id = "poi_${idCounter++}",
@@ -222,7 +229,7 @@ object MathExpressionEvaluator {
             boundaryMinCandidates.sortBy { it.z }
             for (cand in boundaryMinCandidates) {
                 if ((minima.isEmpty() || cand.z < bestInteriorMinZ - eps) &&
-                    isFarEnough(minima, cand.x, cand.y, 0.25)
+                    isFarEnough(minima, cand.x, cand.y, minDist1D)
                 ) {
                     minima += PointOfInterest(
                         id = "poi_${idCounter++}",
@@ -236,14 +243,15 @@ object MathExpressionEvaluator {
             }
         } else {
             val steps = 80
-            val stepSize = (maxCoord - minCoord) / steps
+            val stepX = (maxX - minX) / steps
+            val stepY = (maxY - minY) / steps
             var globalMin = Double.POSITIVE_INFINITY
             var globalMax = Double.NEGATIVE_INFINITY
 
             val grid = Array(steps + 1) { ix ->
-                val x = minCoord + ix * stepSize
+                val x = minX + ix * stepX
                 DoubleArray(steps + 1) { iy ->
-                    val y = minCoord + iy * stepSize
+                    val y = minY + iy * stepY
                     val v = runCatching { evaluate(expression, x, y, params) }.getOrDefault(Double.NaN)
                     if (v.isFinite()) {
                         if (v < globalMin) globalMin = v
@@ -273,8 +281,8 @@ object MathExpressionEvaluator {
                     val center = grid[ix][iy]
                     if (!center.isFinite()) continue
 
-                    val x = minCoord + ix * stepSize
-                    val y = minCoord + iy * stepSize
+                    val x = minX + ix * stepX
+                    val y = minY + iy * stepY
 
                     var isFullMaxCandidate = true
                     var strictlyGreaterThanOne = false
@@ -330,7 +338,7 @@ object MathExpressionEvaluator {
 
             interiorMaxCandidates.sortByDescending { it.z }
             for (cand in interiorMaxCandidates) {
-                if (isFarEnough(maxima, cand.x, cand.y, 0.36)) {
+                if (isFarEnough(maxima, cand.x, cand.y, minDist2D)) {
                     maxima += PointOfInterest(
                         id = "poi_${idCounter++}",
                         type = PointType.MAXIMA,
@@ -344,7 +352,7 @@ object MathExpressionEvaluator {
 
             interiorMinCandidates.sortBy { it.z }
             for (cand in interiorMinCandidates) {
-                if (isFarEnough(minima, cand.x, cand.y, 0.36)) {
+                if (isFarEnough(minima, cand.x, cand.y, minDist2D)) {
                     minima += PointOfInterest(
                         id = "poi_${idCounter++}",
                         type = PointType.MINIMA,
@@ -390,8 +398,8 @@ object MathExpressionEvaluator {
                 val inwardVal = grid[inIx][inIy]
                 if (!inwardVal.isFinite()) continue
 
-                val x = minCoord + ix * stepSize
-                val y = minCoord + iy * stepSize
+                val x = minX + ix * stepX
+                val y = minY + iy * stepY
 
                 val isPerimeterMax = center >= prevVal - eps && center >= nextVal - eps &&
                         (center > prevVal + eps || center > nextVal + eps) &&
@@ -412,7 +420,7 @@ object MathExpressionEvaluator {
             boundaryMaxCandidates.sortByDescending { it.z }
             for (cand in boundaryMaxCandidates) {
                 if ((maxima.isEmpty() || cand.z > bestInteriorMaxZ + eps) &&
-                    isFarEnough(maxima, cand.x, cand.y, 0.36)
+                    isFarEnough(maxima, cand.x, cand.y, minDist2D)
                 ) {
                     maxima += PointOfInterest(
                         id = "poi_${idCounter++}",
@@ -429,7 +437,7 @@ object MathExpressionEvaluator {
             boundaryMinCandidates.sortBy { it.z }
             for (cand in boundaryMinCandidates) {
                 if ((minima.isEmpty() || cand.z < bestInteriorMinZ - eps) &&
-                    isFarEnough(minima, cand.x, cand.y, 0.36)
+                    isFarEnough(minima, cand.x, cand.y, minDist2D)
                 ) {
                     minima += PointOfInterest(
                         id = "poi_${idCounter++}",
@@ -443,7 +451,7 @@ object MathExpressionEvaluator {
             }
 
             for ((zx, zy) in zeroCandidates) {
-                if (isFarEnough(zeros, zx, zy, 0.45)) {
+                if (isFarEnough(zeros, zx, zy, minDistZero2D)) {
                     zeros += PointOfInterest(
                         id = "poi_${idCounter++}",
                         type = PointType.ZERO,
@@ -465,8 +473,11 @@ object MathExpressionEvaluator {
         expression: String,
         a: Double = 1.0,
         b: Double = 1.0,
-        c: Double = 0.0
-    ): List<PointOfInterest> = computePointsOfInterest(expression, mapOf("a" to a, "b" to b, "c" to c))
+        c: Double = 0.0,
+        xDomain: Double = 2.0,
+        yDomain: Double = 2.0
+    ): List<PointOfInterest> =
+        computePointsOfInterest(expression, mapOf("a" to a, "b" to b, "c" to c), xDomain, yDomain)
 
     private fun isFarEnough(existing: List<PointOfInterest>, x: Double, y: Double, minDist: Double): Boolean {
         val minDistSq = minDist * minDist
