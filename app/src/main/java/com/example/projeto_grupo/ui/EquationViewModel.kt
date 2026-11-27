@@ -4,10 +4,16 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.projeto_grupo.data.api.EquationApiService
+import com.example.projeto_grupo.data.local.AuthTokenManager
 import com.example.projeto_grupo.data.local.LocalEquationRepository
 import com.example.projeto_grupo.data.local.SavedEquation
+import com.example.projeto_grupo.data.model.ApiEquationResponse
+import com.example.projeto_grupo.data.model.CreateEquationRequest
 import com.example.projeto_grupo.data.model.EquationModel
+import com.example.projeto_grupo.data.model.LoginRequest
+import com.example.projeto_grupo.data.model.RegisterRequest
 import com.example.projeto_grupo.data.model.UpdateEquationRequest
+import com.example.projeto_grupo.data.model.UserResponse
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -85,12 +91,25 @@ data class EquationUiState(
     val presets: List<EquationPreset> = defaultEquationPresets,
     val savedEquations: List<SavedEquation> = emptyList(),
     val saveNameInput: String = "",
-    val saveFeedbackMessage: String? = null
+    val saveFeedbackMessage: String? = null,
+
+    // Server & Auth State
+    val baseUrlInput: String = "http://10.0.2.2:8000",
+    val isLoggedIn: Boolean = false,
+    val currentUser: UserResponse? = null,
+    val authToken: String? = null,
+    val isServerConnected: Boolean? = null,
+    val authLoading: Boolean = false,
+    val authErrorMessage: String? = null,
+    val authSuccessMessage: String? = null,
+    val serverEquations: List<ApiEquationResponse> = emptyList(),
+    val isSyncingCloud: Boolean = false
 )
 
 class EquationViewModel(application: Application) : AndroidViewModel(application) {
     private val apiService = EquationApiService()
     private val localRepo = LocalEquationRepository(application.applicationContext)
+    private val authManager = AuthTokenManager(application.applicationContext)
 
     private val _uiState = MutableStateFlow(EquationUiState())
     val uiState: StateFlow<EquationUiState> = _uiState.asStateFlow()
@@ -98,6 +117,13 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     init {
         val storedList = localRepo.getSavedEquations()
         val storedActive = localRepo.loadActiveEquation()
+
+        val savedBaseUrl = authManager.getBaseUrl()
+        apiService.setBaseUrl(savedBaseUrl)
+
+        val token = authManager.getToken()
+        val user = authManager.getUser()
+        val loggedIn = authManager.isLoggedIn()
 
         val activeExpr = storedActive?.expression ?: _uiState.value.equation.expression
         val activeParams = storedActive?.getUsedParams() ?: filterParamsForExpression(
@@ -128,17 +154,353 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 aInput = activeParams["a"]?.toString() ?: "",
                 bInput = activeParams["b"]?.toString() ?: "",
                 cInput = activeParams["c"]?.toString() ?: "",
-                savedEquations = storedList
+                savedEquations = storedList,
+                baseUrlInput = savedBaseUrl,
+                isLoggedIn = loggedIn,
+                currentUser = user,
+                authToken = token
+            )
+        }
+
+        viewModelScope.launch {
+            checkServerHealth()
+            if (loggedIn && !token.isNullOrBlank()) {
+                verifySessionAndLoadServerData()
+            } else {
+                fetchServerEquations()
+            }
+        }
+    }
+
+    // --- Server & Auth Actions ---
+
+    fun checkServerHealth(customUrl: String? = null) {
+        val targetUrl = customUrl?.trim()?.ifBlank { null } ?: _uiState.value.baseUrlInput
+        viewModelScope.launch {
+            val isOk = apiService.healthCheck(targetUrl)
+            _uiState.update { it.copy(isServerConnected = isOk) }
+        }
+    }
+
+    fun updateBaseUrl(newUrl: String) {
+        val trimmed = newUrl.trim()
+        authManager.saveBaseUrl(trimmed)
+        val storedUrl = authManager.getBaseUrl()
+        apiService.setBaseUrl(storedUrl)
+        _uiState.update { it.copy(baseUrlInput = storedUrl) }
+        checkServerHealth(storedUrl)
+    }
+
+    fun registerUser(username: String, email: String, pass: String) {
+        val uName = username.trim()
+        val uEmail = email.trim()
+        val uPass = pass.trim()
+
+        if (uName.length < 3) {
+            _uiState.update { it.copy(authErrorMessage = "O nome de utilizador deve ter pelo menos 3 caracteres.") }
+            return
+        }
+        if (!uEmail.contains("@")) {
+            _uiState.update { it.copy(authErrorMessage = "Por favor, insira um email válido.") }
+            return
+        }
+        if (uPass.length < 6) {
+            _uiState.update { it.copy(authErrorMessage = "A palavra-passe deve ter pelo menos 6 caracteres.") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authErrorMessage = null, authSuccessMessage = null) }
+            val req = RegisterRequest(username = uName, email = uEmail, password = uPass)
+            val res = apiService.register(_uiState.value.baseUrlInput, req)
+
+            res.fold(
+                onSuccess = { authResp ->
+                    authManager.saveAuthSession(authResp.accessToken, authResp.user)
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            isLoggedIn = true,
+                            currentUser = authResp.user,
+                            authToken = authResp.accessToken,
+                            authSuccessMessage = "Registo efetuado com sucesso!",
+                            authErrorMessage = null
+                        )
+                    }
+                    fetchServerEquations()
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            authErrorMessage = err.message ?: "Falha ao registar utilizador."
+                        )
+                    }
+                }
             )
         }
     }
+
+    fun loginUser(identifier: String, pass: String) {
+        val idInput = identifier.trim()
+        val uPass = pass.trim()
+
+        if (idInput.isEmpty()) {
+            _uiState.update { it.copy(authErrorMessage = "Insira o seu utilizador ou email.") }
+            return
+        }
+        if (uPass.isEmpty()) {
+            _uiState.update { it.copy(authErrorMessage = "Insira a sua palavra-passe.") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authErrorMessage = null, authSuccessMessage = null) }
+            val req = LoginRequest(identifier = idInput, password = uPass)
+            val res = apiService.login(_uiState.value.baseUrlInput, req)
+
+            res.fold(
+                onSuccess = { authResp ->
+                    authManager.saveAuthSession(authResp.accessToken, authResp.user)
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            isLoggedIn = true,
+                            currentUser = authResp.user,
+                            authToken = authResp.accessToken,
+                            authSuccessMessage = "Sessão iniciada com sucesso!",
+                            authErrorMessage = null
+                        )
+                    }
+                    fetchServerEquations()
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            authErrorMessage = err.message ?: "Credenciais inválidas."
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun logoutUser() {
+        authManager.clearAuthSession()
+        _uiState.update {
+            it.copy(
+                isLoggedIn = false,
+                currentUser = null,
+                authToken = null,
+                authSuccessMessage = "Sessão terminada.",
+                authErrorMessage = null,
+                serverEquations = emptyList()
+            )
+        }
+    }
+
+    fun clearAuthFeedback() {
+        _uiState.update { it.copy(authErrorMessage = null, authSuccessMessage = null) }
+    }
+
+    fun clearSaveFeedback() {
+        _uiState.update { it.copy(saveFeedbackMessage = null) }
+    }
+
+    private suspend fun verifySessionAndLoadServerData() {
+        val token = _uiState.value.authToken ?: return
+        val res = apiService.getMe(_uiState.value.baseUrlInput, token)
+        res.fold(
+            onSuccess = { updatedUser ->
+                authManager.saveAuthSession(token, updatedUser)
+                _uiState.update { it.copy(currentUser = updatedUser) }
+                fetchServerEquations()
+            },
+            onFailure = { err ->
+                if (err is com.example.projeto_grupo.data.api.UnauthorizedException) {
+                    logoutUser()
+                } else {
+                    fetchServerEquations()
+                }
+            }
+        )
+    }
+
+    fun fetchServerEquations() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncingCloud = true) }
+            val res = apiService.getEquations(_uiState.value.baseUrlInput, _uiState.value.authToken)
+            res.fold(
+                onSuccess = { list ->
+                    val userCloudEquations = list.filterNot { it.id == "eq_1" }
+                    _uiState.update {
+                        it.copy(
+                            serverEquations = userCloudEquations,
+                            isSyncingCloud = false,
+                            isServerConnected = true
+                        )
+                    }
+                },
+                onFailure = {
+                    _uiState.update { it.copy(isSyncingCloud = false) }
+                }
+            )
+        }
+    }
+
+    fun saveEquationToCloud(
+        name: String,
+        expression: String,
+        paramsInput: Map<String, String>
+    ): String? {
+        val token = _uiState.value.authToken
+        if (!_uiState.value.isLoggedIn || token.isNullOrBlank()) {
+            return "Inicie sessão no separador Perfil para guardar na nuvem."
+        }
+
+        val expr = expression.trim()
+        val usedNames = MathExpressionEvaluator.extractParameters(expr)
+        val parsedParams = mutableMapOf<String, Double>()
+        for (param in usedNames) {
+            val raw = paramsInput[param] ?: if (param == "c") "0.0" else "1.0"
+            val value = parseParameterNumber(raw) ?: return "Valor inválido para '$param'."
+            parsedParams[param] = value
+        }
+
+        val error = MathExpressionEvaluator.validate(expr, parsedParams)
+        if (error != null) {
+            return error
+        }
+
+        val a = parsedParams["a"] ?: 1.0
+        val b = parsedParams["b"] ?: 1.0
+        val c = parsedParams["c"] ?: 0.0
+        val cleanName = name.trim().ifEmpty { "z = f(x, y) = $expr" }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, saveFeedbackMessage = null) }
+            val req = CreateEquationRequest(
+                title = cleanName,
+                expression = expr,
+                a = a,
+                b = b,
+                c = c
+            )
+            val res = apiService.createEquation(_uiState.value.baseUrlInput, req, token)
+            res.fold(
+                onSuccess = {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            saveFeedbackMessage = "Equação guardada na nuvem com o nome '$cleanName'!",
+                            saveNameInput = ""
+                        )
+                    }
+                    fetchServerEquations()
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            saveFeedbackMessage = "Erro ao guardar na nuvem: ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+        return null
+    }
+
+    fun saveCurrentEquationToCloud(title: String? = null) {
+        val customName = title?.trim()?.ifBlank { null }
+            ?: _uiState.value.saveNameInput.trim().ifBlank { null }
+        val expr = _uiState.value.expressionInput.trim()
+        val err = saveEquationToCloud(
+            name = customName ?: "z = f(x, y) = $expr",
+            expression = expr,
+            paramsInput = _uiState.value.paramsInput
+        )
+        if (err != null) {
+            _uiState.update { it.copy(saveFeedbackMessage = err) }
+        }
+    }
+
+    fun deleteServerEquation(id: String) {
+        val token = _uiState.value.authToken ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            val res = apiService.deleteEquation(id = id, baseUrl = _uiState.value.baseUrlInput, token = token)
+            res.fold(
+                onSuccess = {
+                    _uiState.update { state ->
+                        state.copy(
+                            isLoading = false,
+                            serverEquations = state.serverEquations.filterNot { it.id == id },
+                            saveFeedbackMessage = "Equação eliminada da nuvem."
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            saveFeedbackMessage = "Erro ao eliminar: ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun applyApiEquation(apiEq: ApiEquationResponse): EquationModel {
+        val expr = apiEq.expression
+        val effectiveParams = filterParamsForExpression(expr, mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c))
+        val pois = MathExpressionEvaluator.computePointsOfInterest(
+            expr,
+            effectiveParams,
+            _uiState.value.xDomain,
+            _uiState.value.yDomain
+        )
+        localRepo.saveActiveEquation(expr, effectiveParams)
+
+        val updatedEquation = _uiState.value.equation.copy(
+            id = apiEq.id,
+            title = apiEq.title,
+            expression = expr,
+            a = apiEq.a,
+            b = apiEq.b,
+            c = apiEq.c,
+            params = effectiveParams,
+            pointsOfInterest = pois
+        )
+
+        _uiState.update {
+            it.copy(
+                equation = updatedEquation,
+                expressionInput = expr,
+                paramsInput = effectiveParams.mapValues { e -> e.value.toString() },
+                aInput = effectiveParams["a"]?.toString() ?: "",
+                bInput = effectiveParams["b"]?.toString() ?: "",
+                cInput = effectiveParams["c"]?.toString() ?: "",
+                expressionError = null,
+                saveFeedbackMessage = null
+            )
+        }
+        return updatedEquation
+    }
+
+    // --- Original Local / AR Methods ---
 
     fun loadEquation() {
         if (localRepo.loadActiveEquation() != null) return
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
-            val remote = runCatching { apiService.getEquation("eq_1") }.getOrNull()
+            val remote = runCatching {
+                apiService.getEquation("eq_1", _uiState.value.baseUrlInput, _uiState.value.authToken)
+            }.getOrNull()
+
             if (remote != null) {
                 val remoteParams = filterParamsForExpression(
                     remote.expression,
@@ -223,7 +585,10 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
 
         viewModelScope.launch {
             val request = UpdateEquationRequest(expression = expr, a = a, b = b, c = c)
-            val remoteUpdated = runCatching { apiService.updateEquation("eq_1", request) }.getOrNull()
+            val remoteUpdated = runCatching {
+                apiService.updateEquation("eq_1", request, _uiState.value.baseUrlInput, _uiState.value.authToken)
+            }.getOrNull()
+
             _uiState.update {
                 it.copy(
                     equation = remoteUpdated?.copy(

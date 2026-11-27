@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.projeto_grupo.ui.EquationViewModel
 import com.example.projeto_grupo.ui.ar.ARSceneScreen
+import com.example.projeto_grupo.ui.auth.AuthScreen
 import com.example.projeto_grupo.ui.EquationBottomSheet
 import com.example.projeto_grupo.ui.home.HomeScreen
 import com.example.projeto_grupo.ui.theme.Projeto_grupoTheme
@@ -81,11 +82,12 @@ fun Projeto_grupoApp() {
                     AppDestinations.FAVORITES -> {
                         HomeScreen(
                             viewModel = viewModel,
-                            onNavigateToAR = { currentDestination = AppDestinations.AR_VIEWER }
+                            onNavigateToAR = { currentDestination = AppDestinations.AR_VIEWER },
+                            onNavigateToProfile = { currentDestination = AppDestinations.PROFILE }
                         )
                     }
                     AppDestinations.PROFILE -> {
-                        Greeting(name = "Perfil")
+                        AuthScreen(viewModel = viewModel)
                     }
                 }
             }
@@ -100,12 +102,4 @@ enum class AppDestinations(
     AR_VIEWER("RA Equação", R.drawable.ic_home),
     FAVORITES("Favorites", R.drawable.ic_favorite),
     PROFILE("Profile", R.drawable.ic_account_box),
-}
-
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
 }

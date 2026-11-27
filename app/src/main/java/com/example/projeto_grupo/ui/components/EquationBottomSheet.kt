@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Calculate
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -88,6 +89,7 @@ fun EquationBottomSheet(
                     onApply = viewModel::updateEquationFromInputs,
                     onSaveNameChange = viewModel::updateSaveNameInput,
                     onSaveToDevice = viewModel::saveCurrentEquationToDevice,
+                    onSaveToCloud = { viewModel.saveCurrentEquationToCloud() },
                     onSelectSaved = viewModel::applySavedEquation,
                     onDeleteSaved = viewModel::deleteSavedEquation
                 )
@@ -213,6 +215,7 @@ private fun EditEquationTab(
     onApply: () -> Unit,
     onSaveNameChange: (String) -> Unit,
     onSaveToDevice: () -> Unit,
+    onSaveToCloud: () -> Unit,
     onSelectSaved: (SavedEquation) -> Unit,
     onDeleteSaved: (String) -> Unit
 ) {
@@ -480,15 +483,33 @@ private fun EditEquationTab(
                     activeCalcField = null
                     onSaveToDevice()
                 },
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp)
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Guardar")
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Local")
+            }
+
+            if (uiState.isLoggedIn) {
+                Button(
+                    onClick = {
+                        activeCalcField = null
+                        onSaveToCloud()
+                    },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudUpload,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Nuvem")
+                }
             }
         }
 

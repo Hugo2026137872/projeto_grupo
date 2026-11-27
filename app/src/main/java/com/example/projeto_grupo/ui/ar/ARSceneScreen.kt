@@ -22,7 +22,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
@@ -1052,8 +1054,9 @@ fun ARSceneScreen(
             SaveEquationDialog(
                 initialExpression = uiState.equation.expression,
                 initialParams = uiState.paramsInput,
+                isLoggedIn = uiState.isLoggedIn,
                 onDismiss = { showSaveDialog = false },
-                onSave = { name, expr, params ->
+                onSaveLocal = { name, expr, params ->
                     val err = viewModel.saveEquationToDevice(
                         name = name,
                         expression = expr,
@@ -1061,7 +1064,19 @@ fun ARSceneScreen(
                     )
                     if (err == null) {
                         showSaveDialog = false
-                        Toast.makeText(context, "Equação guardada!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Equação guardada no dispositivo!", Toast.LENGTH_SHORT).show()
+                    }
+                    err
+                },
+                onSaveCloud = { name, expr, params ->
+                    val err = viewModel.saveEquationToCloud(
+                        name = name,
+                        expression = expr,
+                        paramsInput = params
+                    )
+                    if (err == null) {
+                        showSaveDialog = false
+                        Toast.makeText(context, "Equação guardada na nuvem!", Toast.LENGTH_SHORT).show()
                     }
                     err
                 }
@@ -1077,8 +1092,10 @@ private const val SAVE_EXPR_FIELD_KEY = "__SAVE_EXPR__"
 private fun SaveEquationDialog(
     initialExpression: String,
     initialParams: Map<String, String>,
+    isLoggedIn: Boolean,
     onDismiss: () -> Unit,
-    onSave: (name: String, expression: String, params: Map<String, String>) -> String?
+    onSaveLocal: (name: String, expression: String, params: Map<String, String>) -> String?,
+    onSaveCloud: (name: String, expression: String, params: Map<String, String>) -> String?
 ) {
     var name by remember { mutableStateOf("") }
     var expressionValue by remember {
@@ -1292,18 +1309,49 @@ private fun SaveEquationDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = {
-                    val stringParams = detectedParams.associateWith { param ->
-                        paramValues[param]?.text ?: if (param == "c") "0.0" else "1.0"
-                    }
-                    val err = onSave(name, expressionValue.text, stringParams)
-                    if (err != null) {
-                        errorMessage = err
-                    }
-                }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Guardar")
+                OutlinedButton(
+                    onClick = {
+                        val stringParams = detectedParams.associateWith { param ->
+                            paramValues[param]?.text ?: if (param == "c") "0.0" else "1.0"
+                        }
+                        val err = onSaveLocal(name, expressionValue.text, stringParams)
+                        if (err != null) {
+                            errorMessage = err
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PhoneAndroid,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Local")
+                }
+
+                Button(
+                    onClick = {
+                        val stringParams = detectedParams.associateWith { param ->
+                            paramValues[param]?.text ?: if (param == "c") "0.0" else "1.0"
+                        }
+                        val err = onSaveCloud(name, expressionValue.text, stringParams)
+                        if (err != null) {
+                            errorMessage = err
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudUpload,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Nuvem")
+                }
             }
         },
         dismissButton = {
