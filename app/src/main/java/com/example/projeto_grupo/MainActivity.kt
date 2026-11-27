@@ -78,14 +78,11 @@ fun Projeto_grupoApp() {
                         ARSceneScreen(viewModel = viewModel)
                         EquationBottomSheet(viewModel = viewModel)
                     }
-                    AppDestinations.HOME -> {
+                    AppDestinations.FAVORITES -> {
                         HomeScreen(
                             viewModel = viewModel,
                             onNavigateToAR = { currentDestination = AppDestinations.AR_VIEWER }
                         )
-                    }
-                    AppDestinations.FAVORITES -> {
-                        Greeting(name = "Favoritos")
                     }
                     AppDestinations.PROFILE -> {
                         Greeting(name = "Perfil")
@@ -101,7 +98,6 @@ enum class AppDestinations(
     val icon: Int,
 ) {
     AR_VIEWER("RA Equação", R.drawable.ic_home),
-    HOME("Home", R.drawable.ic_home),
     FAVORITES("Favorites", R.drawable.ic_favorite),
     PROFILE("Profile", R.drawable.ic_account_box),
 }
