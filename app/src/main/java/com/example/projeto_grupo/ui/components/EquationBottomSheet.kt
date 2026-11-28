@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.projeto_grupo.data.local.SavedEquation
+import com.example.projeto_grupo.data.model.ApiEquationResponse
 import com.example.projeto_grupo.data.model.PointOfInterest
 import com.example.projeto_grupo.data.model.PointType
 import com.example.projeto_grupo.ui.components.ScientificCalculatorKeyboard
@@ -91,7 +92,9 @@ fun EquationBottomSheet(
                     onSaveToDevice = viewModel::saveCurrentEquationToDevice,
                     onSaveToCloud = { viewModel.saveCurrentEquationToCloud() },
                     onSelectSaved = viewModel::applySavedEquation,
-                    onDeleteSaved = viewModel::deleteSavedEquation
+                    onDeleteSaved = viewModel::deleteSavedEquation,
+                    onSelectCloud = viewModel::applyApiEquation,
+                    onDeleteCloud = viewModel::deleteServerEquation
                 )
             }
         }
@@ -217,7 +220,9 @@ private fun EditEquationTab(
     onSaveToDevice: () -> Unit,
     onSaveToCloud: () -> Unit,
     onSelectSaved: (SavedEquation) -> Unit,
-    onDeleteSaved: (String) -> Unit
+    onDeleteSaved: (String) -> Unit,
+    onSelectCloud: (ApiEquationResponse) -> Unit,
+    onDeleteCloud: (String) -> Unit
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     var activeCalcField by remember { mutableStateOf<String?>(null) }
@@ -542,6 +547,31 @@ private fun EditEquationTab(
                 }
             }
         }
+
+        if (uiState.serverEquations.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Equações na Nuvem (${uiState.serverEquations.size})",
+                style = MaterialTheme.typography.titleSmall
+            )
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                uiState.serverEquations.forEach { apiEq ->
+                    val canDelete = uiState.isLoggedIn &&
+                            (apiEq.ownerId == uiState.currentUser?.id || apiEq.id != "eq_1")
+                    CloudEquationCard(
+                        apiEq = apiEq,
+                        isSelected = uiState.equation.id == apiEq.id &&
+                                uiState.equation.expression == apiEq.expression,
+                        canDelete = canDelete,
+                        onSelect = { onSelectCloud(apiEq) },
+                        onDelete = { onDeleteCloud(apiEq.id) }
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -601,6 +631,75 @@ private fun SavedEquationCard(
                     contentDescription = "Eliminar equação guardada",
                     tint = MaterialTheme.colorScheme.error
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloudEquationCard(
+    apiEq: ApiEquationResponse,
+    isSelected: Boolean,
+    canDelete: Boolean,
+    onSelect: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val allParams = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+    val usedNames = remember(apiEq.expression) {
+        MathExpressionEvaluator.extractParameters(apiEq.expression)
+    }
+    val usedParams = usedNames.associateWith { allParams[it] ?: if (it == "c") 0.0 else 1.0 }
+
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        tonalElevation = 0.dp,
+        color = if (isSelected) {
+            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = apiEq.title.ifBlank { "Equação Servidor ${apiEq.id}" },
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    MathFormulaView(
+                        expression = apiEq.expression,
+                        prefix = "z = ",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                if (usedParams.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = usedParams.entries.joinToString("   ") { "${it.key} = ${it.value}" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (canDelete) {
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Eliminar equação da nuvem",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                }
             }
         }
     }

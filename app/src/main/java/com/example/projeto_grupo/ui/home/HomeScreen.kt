@@ -18,6 +18,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.projeto_grupo.ui.EquationViewModel
+import com.example.projeto_grupo.ui.MathExpressionEvaluator
 import com.example.projeto_grupo.ui.components.EquationGraphPreview
 
 @Composable
@@ -338,7 +339,7 @@ fun HomeScreen(
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 text = if (!uiState.isLoggedIn) "Inicia sessão no separador Perfil para carregar ou guardar equações no servidor."
-                                else "Cria uma equação no separador Perfil ou no menu RA para guardar na nuvem.",
+                                else "Cria uma equação no separador RA Equação para guardar na nuvem.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
@@ -388,10 +389,14 @@ fun HomeScreen(
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val paramsMap = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+                            val allParams = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+                            val usedNames = remember(apiEq.expression) {
+                                MathExpressionEvaluator.extractParameters(apiEq.expression)
+                            }
+                            val usedParams = usedNames.associateWith { allParams[it] ?: if (it == "c") 0.0 else 1.0 }
                             EquationGraphPreview(
                                 expression = apiEq.expression,
-                                params = paramsMap,
+                                params = usedParams,
                                 modifier = Modifier
                                     .size(64.dp)
                                     .clip(RoundedCornerShape(8.dp))
@@ -413,12 +418,14 @@ fun HomeScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "a=${apiEq.a}, b=${apiEq.b}, c=${apiEq.c}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary
-                                )
+                                if (usedParams.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = usedParams.entries.joinToString(", ") { "${it.key} = ${it.value}" },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
+                                }
                             }
 
                             if (uiState.isLoggedIn && (apiEq.ownerId == uiState.currentUser?.id || apiEq.id != "eq_1")) {

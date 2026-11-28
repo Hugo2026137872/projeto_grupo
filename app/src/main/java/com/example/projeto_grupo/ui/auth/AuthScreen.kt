@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -136,17 +137,21 @@ fun AuthScreen(
                 ) {
                     OutlinedTextField(
                         value = serverUrlText,
-                        onValueChange = {
-                            serverUrlText = it
-                            viewModel.updateBaseUrl(it)
-                        },
+                        onValueChange = { serverUrlText = it },
                         label = { Text("URL do Servidor") },
                         placeholder = { Text("http://10.0.2.2:8000") },
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = { viewModel.updateBaseUrl(serverUrlText) }
+                        ),
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(
-                        onClick = { viewModel.checkServerHealth(serverUrlText) }
+                        onClick = { viewModel.updateBaseUrl(serverUrlText) }
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,

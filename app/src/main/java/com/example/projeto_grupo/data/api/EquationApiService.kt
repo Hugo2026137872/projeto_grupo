@@ -13,6 +13,7 @@ import com.example.projeto_grupo.data.model.UserResponse
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -29,6 +30,11 @@ class EquationApiService(
     private var defaultBaseUrl: String = "http://10.0.2.2:8000"
 ) {
     private val client = HttpClient(CIO) {
+        install(HttpTimeout) {
+            connectTimeoutMillis = 5_000
+            requestTimeoutMillis = 10_000
+            socketTimeoutMillis = 10_000
+        }
         install(ContentNegotiation) {
             json(Json {
                 ignoreUnknownKeys = true
@@ -37,6 +43,10 @@ class EquationApiService(
                 encodeDefaults = true
             })
         }
+    }
+
+    fun close() {
+        client.close()
     }
 
     fun setBaseUrl(url: String) {

@@ -35,18 +35,19 @@ fun EquationGraphPreview(
     }
 
     val heights = remember(expression, effectiveParams) {
+        val compiled = runCatching { MathExpressionEvaluator.compile(expression) }.getOrNull()
+        val normalizedParams = effectiveParams.mapKeys { it.key.lowercase() }
         Array(gridSize + 1) { i ->
             DoubleArray(gridSize + 1) { j ->
                 val x = -range + (2 * range * i / gridSize)
                 val y = -range + (2 * range * j / gridSize)
-                val valZ = runCatching {
-                    MathExpressionEvaluator.evaluate(
-                        expression = expression,
-                        x = x,
-                        y = y,
-                        params = effectiveParams
-                    )
-                }.getOrDefault(0.0)
+                val valZ = if (compiled == null) {
+                    0.0
+                } else {
+                    runCatching {
+                        compiled.evaluate(x = x, y = y, params = normalizedParams)
+                    }.getOrDefault(0.0)
+                }
                 if (valZ.isNaN() || valZ.isInfinite()) 0.0 else valZ.coerceIn(-3.0, 3.0)
             }
         }

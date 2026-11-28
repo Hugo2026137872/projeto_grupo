@@ -14,6 +14,8 @@ import com.example.projeto_grupo.data.model.LoginRequest
 import com.example.projeto_grupo.data.model.RegisterRequest
 import com.example.projeto_grupo.data.model.UpdateEquationRequest
 import com.example.projeto_grupo.data.model.UserResponse
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -110,6 +112,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     private val apiService = EquationApiService()
     private val localRepo = LocalEquationRepository(application.applicationContext)
     private val authManager = AuthTokenManager(application.applicationContext)
+    private var poiJob: Job? = null
 
     private val _uiState = MutableStateFlow(EquationUiState())
     val uiState: StateFlow<EquationUiState> = _uiState.asStateFlow()
@@ -134,10 +137,6 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         val activeB = activeParams["b"] ?: 1.0
         val activeC = activeParams["c"] ?: 0.0
 
-        val initialPois = MathExpressionEvaluator.computePointsOfInterest(
-            activeExpr, activeParams
-        )
-
         _uiState.update { state ->
             state.copy(
                 equation = state.equation.copy(
@@ -147,7 +146,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                     b = activeB,
                     c = activeC,
                     params = activeParams,
-                    pointsOfInterest = initialPois
+                    pointsOfInterest = emptyList()
                 ),
                 expressionInput = activeExpr,
                 paramsInput = activeParams.mapValues { it.value.toString() },
@@ -161,6 +160,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 authToken = token
             )
         }
+        recomputePoisAsync(activeExpr, activeParams, _uiState.value.xDomain, _uiState.value.yDomain)
 
         viewModelScope.launch {
             checkServerHealth()
@@ -172,10 +172,44 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        apiService.close()
+    }
+
+    private fun recomputePoisAsync(
+        expression: String,
+        params: Map<String, Double>,
+        xDomain: Double,
+        yDomain: Double
+    ) {
+        poiJob?.cancel()
+        poiJob = viewModelScope.launch(Dispatchers.Default) {
+            val pois = MathExpressionEvaluator.computePointsOfInterest(
+                expression = expression,
+                params = params,
+                xDomain = xDomain,
+                yDomain = yDomain
+            )
+            _uiState.update { state ->
+                if (state.equation.expression == expression &&
+                    state.equation.getEffectiveParams() == params &&
+                    state.xDomain == xDomain &&
+                    state.yDomain == yDomain
+                ) {
+                    state.copy(equation = state.equation.copy(pointsOfInterest = pois))
+                } else {
+                    state
+                }
+            }
+        }
+    }
+
     // --- Server & Auth Actions ---
 
     fun checkServerHealth(customUrl: String? = null) {
         val targetUrl = customUrl?.trim()?.ifBlank { null } ?: _uiState.value.baseUrlInput
+        _uiState.update { it.copy(isServerConnected = null) }
         viewModelScope.launch {
             val isOk = apiService.healthCheck(targetUrl)
             _uiState.update { it.copy(isServerConnected = isOk) }
@@ -352,7 +386,8 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     fun saveEquationToCloud(
         name: String,
         expression: String,
-        paramsInput: Map<String, String>
+        paramsInput: Map<String, String>,
+        onResult: ((Result<String>) -> Unit)? = null
     ): String? {
         val token = _uiState.value.authToken
         if (!_uiState.value.isLoggedIn || token.isNullOrBlank()) {
@@ -398,6 +433,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                         )
                     }
                     fetchServerEquations()
+                    onResult?.invoke(Result.success(cleanName))
                 },
                 onFailure = { err ->
                     _uiState.update {
@@ -406,6 +442,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                             saveFeedbackMessage = "Erro ao guardar na nuvem: ${err.message}"
                         )
                     }
+                    onResult?.invoke(Result.failure(err))
                 }
             )
         }
@@ -456,23 +493,17 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     fun applyApiEquation(apiEq: ApiEquationResponse): EquationModel {
         val expr = apiEq.expression
         val effectiveParams = filterParamsForExpression(expr, mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c))
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            expr,
-            effectiveParams,
-            _uiState.value.xDomain,
-            _uiState.value.yDomain
-        )
         localRepo.saveActiveEquation(expr, effectiveParams)
 
-        val updatedEquation = _uiState.value.equation.copy(
+        val currentState = _uiState.value
+        val updatedEquation = currentState.equation.copy(
             id = apiEq.id,
             title = apiEq.title,
             expression = expr,
             a = apiEq.a,
             b = apiEq.b,
             c = apiEq.c,
-            params = effectiveParams,
-            pointsOfInterest = pois
+            params = effectiveParams
         )
 
         _uiState.update {
@@ -487,6 +518,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 saveFeedbackMessage = null
             )
         }
+        recomputePoisAsync(expr, effectiveParams, currentState.xDomain, currentState.yDomain)
         return updatedEquation
     }
 
@@ -507,16 +539,13 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                     mapOf("a" to remote.a, "b" to remote.b, "c" to remote.c)
                 )
                 if (MathExpressionEvaluator.validate(remote.expression, remoteParams) == null) {
-                    val pois = MathExpressionEvaluator.computePointsOfInterest(
-                        remote.expression, remoteParams
-                    )
                     localRepo.saveActiveEquation(remote.expression, remoteParams)
+                    val currentState = _uiState.value
                     _uiState.update {
                         it.copy(
                             equation = remote.copy(
                                 title = "z = f(x, y) = ${remote.expression}",
-                                params = remoteParams,
-                                pointsOfInterest = pois
+                                params = remoteParams
                             ),
                             isLoading = false,
                             expressionInput = remote.expression,
@@ -527,6 +556,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                             expressionError = null
                         )
                     }
+                    recomputePoisAsync(remote.expression, remoteParams, currentState.xDomain, currentState.yDomain)
                     return@launch
                 }
             }
@@ -553,26 +583,20 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            expr,
-            parsedParams,
-            _uiState.value.xDomain,
-            _uiState.value.yDomain
-        )
         localRepo.saveActiveEquation(expr, parsedParams)
 
         val a = parsedParams["a"] ?: 1.0
         val b = parsedParams["b"] ?: 1.0
         val c = parsedParams["c"] ?: 0.0
 
-        val localUpdated = _uiState.value.equation.copy(
+        val currentState = _uiState.value
+        val localUpdated = currentState.equation.copy(
             title = "z = f(x, y) = $expr",
             expression = expr,
             a = a,
             b = b,
             c = c,
-            params = parsedParams,
-            pointsOfInterest = pois
+            params = parsedParams
         )
 
         _uiState.update {
@@ -582,6 +606,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 isLoading = true
             )
         }
+        recomputePoisAsync(expr, parsedParams, currentState.xDomain, currentState.yDomain)
 
         viewModelScope.launch {
             val request = UpdateEquationRequest(expression = expr, a = a, b = b, c = c)
@@ -589,13 +614,14 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 apiService.updateEquation("eq_1", request, _uiState.value.baseUrlInput, _uiState.value.authToken)
             }.getOrNull()
 
-            _uiState.update {
-                it.copy(
+            _uiState.update { state ->
+                val latestPois = state.equation.pointsOfInterest
+                state.copy(
                     equation = remoteUpdated?.copy(
                         title = "z = f(x, y) = $expr",
                         params = parsedParams,
-                        pointsOfInterest = pois
-                    ) ?: localUpdated,
+                        pointsOfInterest = latestPois
+                    ) ?: state.equation,
                     isLoading = false
                 )
             }
@@ -627,12 +653,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
             params = parsedParams
         )
 
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            expr,
-            parsedParams,
-            _uiState.value.xDomain,
-            _uiState.value.yDomain
-        )
+        val currentState = _uiState.value
         _uiState.update {
             it.copy(
                 equation = it.equation.copy(
@@ -641,8 +662,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                     a = parsedParams["a"] ?: 1.0,
                     b = parsedParams["b"] ?: 1.0,
                     c = parsedParams["c"] ?: 0.0,
-                    params = parsedParams,
-                    pointsOfInterest = pois
+                    params = parsedParams
                 ),
                 savedEquations = updatedList,
                 saveNameInput = "",
@@ -650,6 +670,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 saveFeedbackMessage = "Equação guardada no dispositivo."
             )
         }
+        recomputePoisAsync(expr, parsedParams, currentState.xDomain, currentState.yDomain)
     }
 
     fun saveEquationToDevice(
@@ -677,12 +698,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
             params = parsedParams
         )
 
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            expr,
-            parsedParams,
-            _uiState.value.xDomain,
-            _uiState.value.yDomain
-        )
+        val currentState = _uiState.value
         _uiState.update {
             it.copy(
                 equation = it.equation.copy(
@@ -691,8 +707,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                     a = parsedParams["a"] ?: 1.0,
                     b = parsedParams["b"] ?: 1.0,
                     c = parsedParams["c"] ?: 0.0,
-                    params = parsedParams,
-                    pointsOfInterest = pois
+                    params = parsedParams
                 ),
                 expressionInput = expr,
                 paramsInput = parsedParams.mapValues { e -> e.value.toString() },
@@ -705,6 +720,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 saveFeedbackMessage = "Equação guardada no dispositivo."
             )
         }
+        recomputePoisAsync(expr, parsedParams, currentState.xDomain, currentState.yDomain)
         return null
     }
 
@@ -718,22 +734,16 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         val b = effectiveParams["b"] ?: 1.0
         val c = effectiveParams["c"] ?: 0.0
 
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            expr,
-            effectiveParams,
-            _uiState.value.xDomain,
-            _uiState.value.yDomain
-        )
         localRepo.saveActiveEquation(expr, effectiveParams)
 
-        val updatedEquation = _uiState.value.equation.copy(
+        val currentState = _uiState.value
+        val updatedEquation = currentState.equation.copy(
             title = "z = f(x, y) = $expr",
             expression = expr,
             a = a,
             b = b,
             c = c,
-            params = effectiveParams,
-            pointsOfInterest = pois
+            params = effectiveParams
         )
 
         _uiState.update {
@@ -748,27 +758,22 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 saveFeedbackMessage = null
             )
         }
+        recomputePoisAsync(expr, effectiveParams, currentState.xDomain, currentState.yDomain)
         return updatedEquation
     }
 
     fun applySavedEquation(saved: SavedEquation): EquationModel {
         val usedParams = saved.getUsedParams()
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            saved.expression,
-            usedParams,
-            _uiState.value.xDomain,
-            _uiState.value.yDomain
-        )
         localRepo.saveActiveEquation(saved.expression, usedParams)
 
-        val updatedEquation = _uiState.value.equation.copy(
+        val currentState = _uiState.value
+        val updatedEquation = currentState.equation.copy(
             title = "z = f(x, y) = ${saved.expression}",
             expression = saved.expression,
             a = usedParams["a"] ?: 1.0,
             b = usedParams["b"] ?: 1.0,
             c = usedParams["c"] ?: 0.0,
-            params = usedParams,
-            pointsOfInterest = pois
+            params = usedParams
         )
 
         _uiState.update {
@@ -783,6 +788,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 saveFeedbackMessage = null
             )
         }
+        recomputePoisAsync(saved.expression, usedParams, currentState.xDomain, currentState.yDomain)
         return updatedEquation
     }
 
@@ -847,37 +853,29 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     fun updateXDomain(domain: Double) {
         val clamped = (kotlin.math.round(domain * 10.0) / 10.0).coerceIn(0.5, 10.0)
         _uiState.update { state ->
-            val expr = state.equation.expression
-            val params = state.equation.getEffectiveParams()
-            val pois = MathExpressionEvaluator.computePointsOfInterest(
-                expr,
-                params,
-                clamped,
-                state.yDomain
-            )
-            state.copy(
-                xDomain = clamped,
-                equation = state.equation.copy(pointsOfInterest = pois)
-            )
+            state.copy(xDomain = clamped)
         }
+        val state = _uiState.value
+        recomputePoisAsync(
+            state.equation.expression,
+            state.equation.getEffectiveParams(),
+            clamped,
+            state.yDomain
+        )
     }
 
     fun updateYDomain(domain: Double) {
         val clamped = (kotlin.math.round(domain * 10.0) / 10.0).coerceIn(0.5, 10.0)
         _uiState.update { state ->
-            val expr = state.equation.expression
-            val params = state.equation.getEffectiveParams()
-            val pois = MathExpressionEvaluator.computePointsOfInterest(
-                expr,
-                params,
-                state.xDomain,
-                clamped
-            )
-            state.copy(
-                yDomain = clamped,
-                equation = state.equation.copy(pointsOfInterest = pois)
-            )
+            state.copy(yDomain = clamped)
         }
+        val state = _uiState.value
+        recomputePoisAsync(
+            state.equation.expression,
+            state.equation.getEffectiveParams(),
+            state.xDomain,
+            clamped
+        )
     }
 
     fun updateExpressionInput(input: String) {
@@ -955,12 +953,6 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         val parsedParams = parseUsedParams(expr, state.paramsInput) ?: return
         if (MathExpressionEvaluator.validate(expr, parsedParams) != null) return
 
-        val pois = MathExpressionEvaluator.computePointsOfInterest(
-            expr,
-            parsedParams,
-            state.xDomain,
-            state.yDomain
-        )
         localRepo.saveActiveEquation(expr, parsedParams)
 
         _uiState.update {
@@ -971,11 +963,11 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                     a = parsedParams["a"] ?: 1.0,
                     b = parsedParams["b"] ?: 1.0,
                     c = parsedParams["c"] ?: 0.0,
-                    params = parsedParams,
-                    pointsOfInterest = pois
+                    params = parsedParams
                 ),
                 expressionError = null
             )
         }
+        recomputePoisAsync(expr, parsedParams, state.xDomain, state.yDomain)
     }
 }

@@ -37,31 +37,75 @@ object MathExpressionEvaluator {
         return params.sorted()
     }
 
+    fun compile(expression: String): CompiledExpression {
+        val tokens = tokenize(expression)
+        if (tokens.isEmpty()) {
+            return CompiledExpression(ExprNode.Const(Double.NaN))
+        }
+        val parser = Parser(tokens = tokens)
+        val root = parser.parseExpression()
+        if (parser.hasRemaining()) {
+            throw IllegalArgumentException("Token inesperado perto de '${parser.peek()}'")
+        }
+        return CompiledExpression(root)
+    }
+
     fun evaluate(
         expression: String,
         x: Double,
         y: Double,
         params: Map<String, Double>
-    ): Double {
-        val tokens = tokenize(expression)
-        if (tokens.isEmpty()) return Double.NaN
-        val varMap = mutableMapOf(
-            "x" to x,
-            "y" to y,
-            "pi" to PI,
-            "e" to Math.E
-        )
-        params.forEach { (k, v) -> varMap[k.lowercase()] = v }
+    ): Double = compile(expression).evaluate(x, y, params)
 
-        val parser = Parser(
-            tokens = tokens,
-            variables = varMap
-        )
-        val result = parser.parseExpression()
-        if (parser.hasRemaining()) {
-            throw IllegalArgumentException("Token inesperado perto de '${parser.peek()}'")
+    class CompiledExpression internal constructor(
+        private val root: ExprNode
+    ) {
+        fun evaluate(
+            x: Double,
+            y: Double,
+            params: Map<String, Double> = emptyMap()
+        ): Double = evalNode(root, x, y, params)
+
+        private fun evalNode(
+            node: ExprNode,
+            x: Double,
+            y: Double,
+            params: Map<String, Double>
+        ): Double = when (node) {
+            is ExprNode.Const -> node.value
+            is ExprNode.Var -> when (node.name) {
+                "x" -> x
+                "y" -> y
+                "pi" -> PI
+                "e" -> Math.E
+                else -> params[node.name] ?: 1.0
+            }
+            is ExprNode.UnaryMinus -> -evalNode(node.operand, x, y, params)
+            is ExprNode.BinaryOp -> {
+                val l = evalNode(node.left, x, y, params)
+                val r = evalNode(node.right, x, y, params)
+                when (node.op) {
+                    '+' -> l + r
+                    '-' -> l - r
+                    '*' -> l * r
+                    '/' -> l / r
+                    '^' -> l.pow(r)
+                    else -> Double.NaN
+                }
+            }
+            is ExprNode.FuncCall -> {
+                val arg = evalNode(node.arg, x, y, params)
+                applyFunction(node.name, arg)
+            }
         }
-        return result
+    }
+
+    internal sealed interface ExprNode {
+        data class Const(val value: Double) : ExprNode
+        data class Var(val name: String) : ExprNode
+        data class UnaryMinus(val operand: ExprNode) : ExprNode
+        data class BinaryOp(val op: Char, val left: ExprNode, val right: ExprNode) : ExprNode
+        data class FuncCall(val name: String, val arg: ExprNode) : ExprNode
     }
 
     fun evaluate(
@@ -105,8 +149,11 @@ object MathExpressionEvaluator {
         val minDist2D = (maxOf(xDomain, yDomain) * 0.18).coerceAtLeast(0.12)
         val minDistZero2D = (maxOf(xDomain, yDomain) * 0.22).coerceAtLeast(0.15)
 
-        val yTest1 = runCatching { evaluate(expression, xDomain * 0.175, -yDomain * 0.4, params) }.getOrDefault(0.0)
-        val yTest2 = runCatching { evaluate(expression, xDomain * 0.175, yDomain * 0.4, params) }.getOrDefault(0.0)
+        val compiled = runCatching { compile(expression) }.getOrNull() ?: return emptyList()
+        val normalizedParams = params.mapKeys { it.key.lowercase() }
+
+        val yTest1 = runCatching { compiled.evaluate(xDomain * 0.175, -yDomain * 0.4, normalizedParams) }.getOrDefault(0.0)
+        val yTest2 = runCatching { compiled.evaluate(xDomain * 0.175, yDomain * 0.4, normalizedParams) }.getOrDefault(0.0)
         val variesInY = abs(yTest1 - yTest2) > 1e-6
 
         val maxima = mutableListOf<PointOfInterest>()
@@ -119,7 +166,7 @@ object MathExpressionEvaluator {
             val stepSize = (maxX - minX) / steps
             val values = DoubleArray(steps + 1) { ix ->
                 val x = minX + ix * stepSize
-                runCatching { evaluate(expression, x, 0.0, params) }.getOrDefault(Double.NaN)
+                runCatching { compiled.evaluate(x, 0.0, normalizedParams) }.getOrDefault(Double.NaN)
             }
 
             val finiteValues = values.filter { it.isFinite() }
@@ -252,7 +299,7 @@ object MathExpressionEvaluator {
                 val x = minX + ix * stepX
                 DoubleArray(steps + 1) { iy ->
                     val y = minY + iy * stepY
-                    val v = runCatching { evaluate(expression, x, y, params) }.getOrDefault(Double.NaN)
+                    val v = runCatching { compiled.evaluate(x, y, normalizedParams) }.getOrDefault(Double.NaN)
                     if (v.isFinite()) {
                         if (v < globalMin) globalMin = v
                         if (v > globalMax) globalMax = v
@@ -405,7 +452,7 @@ object MathExpressionEvaluator {
                         (center > prevVal + eps || center > nextVal + eps) &&
                         center > inwardVal + eps
 
-                val isPerimeterMin = center <= prevVal + eps && center <= nextVal - eps &&
+                val isPerimeterMin = center <= prevVal + eps && center <= nextVal + eps &&
                         (center < prevVal - eps || center < nextVal - eps) &&
                         center < inwardVal - eps
 
@@ -555,22 +602,21 @@ object MathExpressionEvaluator {
         name in setOf("sin", "cos", "tan", "sqrt", "abs", "exp", "ln", "log")
 
     private class Parser(
-        private val tokens: List<Token>,
-        private val variables: Map<String, Double>
+        private val tokens: List<Token>
     ) {
         private var pos = 0
 
         fun hasRemaining(): Boolean = pos < tokens.size
         fun peek(): Token? = tokens.getOrNull(pos)
 
-        fun parseExpression(): Double {
+        fun parseExpression(): ExprNode {
             var left = parseTerm()
             while (pos < tokens.size) {
                 val tok = tokens[pos]
                 if (tok is Token.Operator && (tok.op == '+' || tok.op == '-')) {
                     pos++
                     val right = parseTerm()
-                    left = if (tok.op == '+') left + right else left - right
+                    left = ExprNode.BinaryOp(tok.op, left, right)
                 } else {
                     break
                 }
@@ -578,14 +624,14 @@ object MathExpressionEvaluator {
             return left
         }
 
-        private fun parseTerm(): Double {
+        private fun parseTerm(): ExprNode {
             var left = parsePower()
             while (pos < tokens.size) {
                 val tok = tokens[pos]
                 if (tok is Token.Operator && (tok.op == '*' || tok.op == '/')) {
                     pos++
                     val right = parsePower()
-                    left = if (tok.op == '*') left * right else left / right
+                    left = ExprNode.BinaryOp(tok.op, left, right)
                 } else {
                     break
                 }
@@ -593,35 +639,35 @@ object MathExpressionEvaluator {
             return left
         }
 
-        private fun parsePower(): Double {
+        private fun parsePower(): ExprNode {
             val base = parseUnary()
             val tok = tokens.getOrNull(pos)
             if (tok is Token.Operator && tok.op == '^') {
                 pos++
                 val exponent = parsePower()
-                return base.pow(exponent)
+                return ExprNode.BinaryOp('^', base, exponent)
             }
             return base
         }
 
-        private fun parseUnary(): Double {
+        private fun parseUnary(): ExprNode {
             val tok = tokens.getOrNull(pos)
             if (tok is Token.Operator && (tok.op == '+' || tok.op == '-')) {
                 pos++
                 val operand = parseUnary()
-                return if (tok.op == '-') -operand else operand
+                return if (tok.op == '-') ExprNode.UnaryMinus(operand) else operand
             }
             return parsePrimary()
         }
 
-        private fun parsePrimary(): Double {
+        private fun parsePrimary(): ExprNode {
             val tok = tokens.getOrNull(pos)
                 ?: throw IllegalArgumentException("Fim inesperado da expressão.")
 
             return when (tok) {
                 is Token.Number -> {
                     pos++
-                    tok.value
+                    ExprNode.Const(tok.value)
                 }
                 is Token.LParen -> {
                     pos++
@@ -644,25 +690,25 @@ object MathExpressionEvaluator {
                             throw IllegalArgumentException("Parêntese ')' em falta após '${tok.name}(...)'.")
                         }
                         pos++
-                        applyFunction(tok.name, arg)
+                        ExprNode.FuncCall(tok.name, arg)
                     } else {
-                        variables[tok.name] ?: 1.0
+                        ExprNode.Var(tok.name)
                     }
                 }
                 else -> throw IllegalArgumentException("Token inesperado: $tok")
             }
         }
+    }
 
-        private fun applyFunction(name: String, arg: Double): Double = when (name) {
-            "sin" -> sin(arg)
-            "cos" -> cos(arg)
-            "tan" -> tan(arg)
-            "sqrt" -> if (arg < 0.0) Double.NaN else sqrt(arg)
-            "abs" -> abs(arg)
-            "exp" -> exp(arg)
-            "ln" -> if (arg <= 0.0) Double.NaN else ln(arg)
-            "log" -> if (arg <= 0.0) Double.NaN else log10(arg)
-            else -> throw IllegalArgumentException("Função desconhecida: $name")
-        }
+    private fun applyFunction(name: String, arg: Double): Double = when (name) {
+        "sin" -> sin(arg)
+        "cos" -> cos(arg)
+        "tan" -> tan(arg)
+        "sqrt" -> if (arg < 0.0) Double.NaN else sqrt(arg)
+        "abs" -> abs(arg)
+        "exp" -> exp(arg)
+        "ln" -> if (arg <= 0.0) Double.NaN else ln(arg)
+        "log" -> if (arg <= 0.0) Double.NaN else log10(arg)
+        else -> throw IllegalArgumentException("Função desconhecida: $name")
     }
 }
