@@ -1,5 +1,7 @@
 package com.example.projeto_grupo.ui.components
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -16,23 +18,35 @@ import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardHide
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.awaitCancellation
 
 fun insertTokenAtSelection(current: TextFieldValue, token: String): TextFieldValue {
     val start = minOf(current.selection.start, current.selection.end).coerceIn(0, current.text.length)
@@ -62,6 +76,55 @@ fun moveSelectionCursor(current: TextFieldValue, delta: Int): TextFieldValue {
     return current.copy(selection = TextRange(newPos))
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+fun CalculatorInputField(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    onActivateCalculator: () -> Unit,
+    modifier: Modifier = Modifier,
+    label: @Composable (() -> Unit)? = null,
+    placeholder: @Composable (() -> Unit)? = null,
+    trailingIcon: @Composable (() -> Unit)? = null,
+    isError: Boolean = false,
+    supportingText: @Composable (() -> Unit)? = null
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(interactionSource) {
+        interactionSource.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) {
+                keyboardController?.hide()
+                onActivateCalculator()
+            }
+        }
+    }
+
+    InterceptPlatformTextInput(
+        interceptor = { _, _ -> awaitCancellation() }
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            readOnly = false,
+            interactionSource = interactionSource,
+            label = label,
+            placeholder = placeholder,
+            trailingIcon = trailingIcon,
+            isError = isError,
+            supportingText = supportingText,
+            singleLine = true,
+            modifier = modifier.onFocusChanged { focusState ->
+                if (focusState.isFocused) {
+                    keyboardController?.hide()
+                    onActivateCalculator()
+                }
+            }
+        )
+    }
+}
+
 @Composable
 fun ScientificCalculatorKeyboard(
     targetLabel: String,
@@ -73,6 +136,8 @@ fun ScientificCalculatorKeyboard(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showSymbolsMode by remember(isNumericOnly) { mutableStateOf(false) }
+
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -85,7 +150,7 @@ fun ScientificCalculatorKeyboard(
                 .padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Header bar with cursor controls and hide button
+            // Header bar with mode toggle, cursor controls, and hide button
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -101,6 +166,19 @@ fun ScientificCalculatorKeyboard(
                     modifier = Modifier.weight(1f)
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!isNumericOnly) {
+                        TextButton(
+                            onClick = { showSymbolsMode = !showSymbolsMode },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text(
+                                text = if (showSymbolsMode) "123" else "∂ / αβ",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                     IconButton(
                         onClick = { onMoveCursor(-1) },
                         modifier = Modifier.size(36.dp)
@@ -135,7 +213,52 @@ fun ScientificCalculatorKeyboard(
                 }
             }
 
-            if (!isNumericOnly) {
+            if (!isNumericOnly && showSymbolsMode) {
+                CalcRow(
+                    keys = listOf(
+                        CalcKey("\\partial", "∂", isFunction = true),
+                        CalcKey("pdx(", "∂/∂x", isFunction = true),
+                        CalcKey("pdy(", "∂/∂y", isFunction = true),
+                        CalcKey("grad(", "∇", isFunction = true),
+                        CalcKey("\\frac{", "a/b", isFunction = true),
+                        CalcKey("\\sqrt{", "√{}", isFunction = true)
+                    ),
+                    onInsert = onInsert
+                )
+                CalcRow(
+                    keys = listOf(
+                        CalcKey("floor(", "⌊x⌋", isFunction = true),
+                        CalcKey("ceil(", "⌈x⌉", isFunction = true),
+                        CalcKey("!", isOperator = true),
+                        CalcKey("\\cdot", "·", isOperator = true),
+                        CalcKey("{", isOperator = true),
+                        CalcKey("}", isOperator = true)
+                    ),
+                    onInsert = onInsert
+                )
+                CalcRow(
+                    keys = listOf(
+                        CalcKey("\\alpha", "α", isVariable = true),
+                        CalcKey("\\beta", "β", isVariable = true),
+                        CalcKey("\\theta", "θ", isVariable = true),
+                        CalcKey("\\lambda", "λ", isVariable = true),
+                        CalcKey("\\omega", "ω", isVariable = true),
+                        CalcKey("\\phi", "φ", isVariable = true)
+                    ),
+                    onInsert = onInsert
+                )
+                CalcRow(
+                    keys = listOf(
+                        CalcKey("\\Delta", "Δ", isVariable = true),
+                        CalcKey("\\sigma", "σ", isVariable = true),
+                        CalcKey("\\pi", "π", isVariable = true),
+                        CalcKey("_", isOperator = true),
+                        CalcKey("|", isOperator = true),
+                        CalcKey("=", isOperator = true)
+                    ),
+                    onInsert = onInsert
+                )
+            } else if (!isNumericOnly) {
                 // Scientific functions row 1
                 CalcRow(
                     keys = listOf(
@@ -163,75 +286,66 @@ fun ScientificCalculatorKeyboard(
                 )
             }
 
-            // Numbers + operators rows
-            CalcRow(
-                keys = if (isNumericOnly) {
-                    listOf(
+            if (!showSymbolsMode) {
+                // Numbers + operators rows
+                CalcRow(
+                    keys = listOf(
                         CalcKey("7"),
                         CalcKey("8"),
                         CalcKey("9"),
                         CalcKey("/", isOperator = true),
                         CalcKey("(", isOperator = true),
                         CalcKey(")", isOperator = true)
-                    )
-                } else {
-                    listOf(
-                        CalcKey("7"),
-                        CalcKey("8"),
-                        CalcKey("9"),
-                        CalcKey("/", isOperator = true),
-                        CalcKey("(", isOperator = true),
-                        CalcKey(")", isOperator = true)
-                    )
-                },
-                onInsert = onInsert
-            )
+                    ),
+                    onInsert = onInsert
+                )
 
-            CalcRow(
-                keys = if (isNumericOnly) {
-                    listOf(
-                        CalcKey("4"),
-                        CalcKey("5"),
-                        CalcKey("6"),
-                        CalcKey("*", "×", isOperator = true),
-                        CalcKey("pi", "π", isVariable = true),
-                        CalcKey("e", isVariable = true)
-                    )
-                } else {
-                    listOf(
-                        CalcKey("4"),
-                        CalcKey("5"),
-                        CalcKey("6"),
-                        CalcKey("*", "×", isOperator = true),
-                        CalcKey("^", isOperator = true),
-                        CalcKey("a", isVariable = true)
-                    )
-                },
-                onInsert = onInsert
-            )
+                CalcRow(
+                    keys = if (isNumericOnly) {
+                        listOf(
+                            CalcKey("4"),
+                            CalcKey("5"),
+                            CalcKey("6"),
+                            CalcKey("*", "×", isOperator = true),
+                            CalcKey("pi", "π", isVariable = true),
+                            CalcKey("e", isVariable = true)
+                        )
+                    } else {
+                        listOf(
+                            CalcKey("4"),
+                            CalcKey("5"),
+                            CalcKey("6"),
+                            CalcKey("*", "×", isOperator = true),
+                            CalcKey("^", isOperator = true),
+                            CalcKey("a", isVariable = true)
+                        )
+                    },
+                    onInsert = onInsert
+                )
 
-            CalcRow(
-                keys = if (isNumericOnly) {
-                    listOf(
-                        CalcKey("1"),
-                        CalcKey("2"),
-                        CalcKey("3"),
-                        CalcKey("-", isOperator = true),
-                        CalcKey("^", isOperator = true),
-                        CalcKey("sqrt(", "√(", isFunction = true)
-                    )
-                } else {
-                    listOf(
-                        CalcKey("1"),
-                        CalcKey("2"),
-                        CalcKey("3"),
-                        CalcKey("-", isOperator = true),
-                        CalcKey("b", isVariable = true),
-                        CalcKey("c", isVariable = true)
-                    )
-                },
-                onInsert = onInsert
-            )
+                CalcRow(
+                    keys = if (isNumericOnly) {
+                        listOf(
+                            CalcKey("1"),
+                            CalcKey("2"),
+                            CalcKey("3"),
+                            CalcKey("-", isOperator = true),
+                            CalcKey("^", isOperator = true),
+                            CalcKey("sqrt(", "√(", isFunction = true)
+                        )
+                    } else {
+                        listOf(
+                            CalcKey("1"),
+                            CalcKey("2"),
+                            CalcKey("3"),
+                            CalcKey("-", isOperator = true),
+                            CalcKey("b", isVariable = true),
+                            CalcKey("c", isVariable = true)
+                        )
+                    },
+                    onInsert = onInsert
+                )
+            }
 
             // Bottom row with 0, ., +, C, Backspace
             Row(

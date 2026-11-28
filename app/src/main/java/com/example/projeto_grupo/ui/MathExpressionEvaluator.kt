@@ -4,8 +4,10 @@ import com.example.projeto_grupo.data.model.PointOfInterest
 import com.example.projeto_grupo.data.model.PointType
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.log10
 import kotlin.math.pow
@@ -23,8 +25,22 @@ object MathExpressionEvaluator {
         val isBoundary: Boolean
     )
 
+    private fun preprocessForEvaluator(expression: String): String {
+        val trimmed = expression.trim()
+        if (trimmed.isEmpty()) return trimmed
+        val needsLatexNormalization = trimmed.any {
+            it == '\\' || it == '{' || it == '}' || it == '[' || it == ']' || it == '|' || it == '='
+        }
+        return if (needsLatexNormalization) {
+            LatexToExpressionConverter.convert(trimmed).expression
+        } else {
+            trimmed
+        }
+    }
+
     fun extractParameters(expression: String): List<String> {
-        val tokens = runCatching { tokenize(expression) }.getOrNull() ?: return emptyList()
+        val normalized = preprocessForEvaluator(expression)
+        val tokens = runCatching { tokenize(normalized) }.getOrNull() ?: return emptyList()
         val params = mutableSetOf<String>()
         for (tok in tokens) {
             if (tok is Token.Identifier) {
@@ -38,7 +54,8 @@ object MathExpressionEvaluator {
     }
 
     fun compile(expression: String): CompiledExpression {
-        val tokens = tokenize(expression)
+        val normalized = preprocessForEvaluator(expression)
+        val tokens = tokenize(normalized)
         if (tokens.isEmpty()) {
             return CompiledExpression(ExprNode.Const(Double.NaN))
         }
@@ -81,6 +98,22 @@ object MathExpressionEvaluator {
                 else -> params[node.name] ?: 1.0
             }
             is ExprNode.UnaryMinus -> -evalNode(node.operand, x, y, params)
+            is ExprNode.Factorial -> {
+                val v = evalNode(node.operand, x, y, params)
+                gammaFactorial(v)
+            }
+            is ExprNode.PartialDeriv -> {
+                val h = 1e-4
+                when (node.axis) {
+                    'x' -> (evalNode(node.body, x + h, y, params) - evalNode(node.body, x - h, y, params)) / (2.0 * h)
+                    'y' -> (evalNode(node.body, x, y + h, params) - evalNode(node.body, x, y - h, params)) / (2.0 * h)
+                    else -> {
+                        val dx = (evalNode(node.body, x + h, y, params) - evalNode(node.body, x - h, y, params)) / (2.0 * h)
+                        val dy = (evalNode(node.body, x, y + h, params) - evalNode(node.body, x, y - h, params)) / (2.0 * h)
+                        sqrt(dx * dx + dy * dy)
+                    }
+                }
+            }
             is ExprNode.BinaryOp -> {
                 val l = evalNode(node.left, x, y, params)
                 val r = evalNode(node.right, x, y, params)
@@ -104,6 +137,8 @@ object MathExpressionEvaluator {
         data class Const(val value: Double) : ExprNode
         data class Var(val name: String) : ExprNode
         data class UnaryMinus(val operand: ExprNode) : ExprNode
+        data class Factorial(val operand: ExprNode) : ExprNode
+        data class PartialDeriv(val axis: Char, val body: ExprNode) : ExprNode
         data class BinaryOp(val op: Char, val left: ExprNode, val right: ExprNode) : ExprNode
         data class FuncCall(val name: String, val arg: ExprNode) : ExprNode
     }
@@ -577,6 +612,10 @@ object MathExpressionEvaluator {
                     raw += Token.Operator(ch)
                     i++
                 }
+                ch == '!' -> {
+                    raw += Token.Operator('!')
+                    i++
+                }
                 else -> throw IllegalArgumentException("Carácter inválido: '$ch'")
             }
         }
@@ -588,6 +627,7 @@ object MathExpressionEvaluator {
             if (idx + 1 < raw.size) {
                 val next = raw[idx + 1]
                 val currEndsValue = curr is Token.Number || curr is Token.RParen ||
+                        (curr is Token.Operator && curr.op == '!') ||
                         (curr is Token.Identifier && !isFunctionName(curr.name))
                 val nextStartsValue = next is Token.Number || next is Token.LParen || next is Token.Identifier
                 if (currEndsValue && nextStartsValue) {
@@ -599,7 +639,10 @@ object MathExpressionEvaluator {
     }
 
     private fun isFunctionName(name: String): Boolean =
-        name in setOf("sin", "cos", "tan", "sqrt", "abs", "exp", "ln", "log")
+        name in setOf(
+            "sin", "cos", "tan", "sqrt", "abs", "exp", "ln", "log",
+            "floor", "ceil", "pdx", "pdy", "grad"
+        )
 
     private class Parser(
         private val tokens: List<Token>
@@ -657,7 +700,21 @@ object MathExpressionEvaluator {
                 val operand = parseUnary()
                 return if (tok.op == '-') ExprNode.UnaryMinus(operand) else operand
             }
-            return parsePrimary()
+            return parsePostfix()
+        }
+
+        private fun parsePostfix(): ExprNode {
+            var node = parsePrimary()
+            while (true) {
+                val tok = tokens.getOrNull(pos)
+                if (tok is Token.Operator && tok.op == '!') {
+                    pos++
+                    node = ExprNode.Factorial(node)
+                } else {
+                    break
+                }
+            }
+            return node
         }
 
         private fun parsePrimary(): ExprNode {
@@ -690,7 +747,12 @@ object MathExpressionEvaluator {
                             throw IllegalArgumentException("Parêntese ')' em falta após '${tok.name}(...)'.")
                         }
                         pos++
-                        ExprNode.FuncCall(tok.name, arg)
+                        when (tok.name) {
+                            "pdx" -> ExprNode.PartialDeriv('x', arg)
+                            "pdy" -> ExprNode.PartialDeriv('y', arg)
+                            "grad" -> ExprNode.PartialDeriv('g', arg)
+                            else -> ExprNode.FuncCall(tok.name, arg)
+                        }
                     } else {
                         ExprNode.Var(tok.name)
                     }
@@ -709,6 +771,38 @@ object MathExpressionEvaluator {
         "exp" -> exp(arg)
         "ln" -> if (arg <= 0.0) Double.NaN else ln(arg)
         "log" -> if (arg <= 0.0) Double.NaN else log10(arg)
+        "floor" -> floor(arg)
+        "ceil" -> ceil(arg)
         else -> throw IllegalArgumentException("Função desconhecida: $name")
+    }
+
+    private fun gammaFactorial(n: Double): Double {
+        if (!n.isFinite() || n < -0.5) return Double.NaN
+        if (n <= 170.0 && abs(n - round(n)) < 1e-9 && n >= 0.0) {
+            val k = round(n).toInt()
+            var prod = 1.0
+            for (i in 2..k) prod *= i
+            return prod
+        }
+        // Lanczos approximation for Gamma(n + 1)
+        val z = n + 1.0
+        val p = doubleArrayOf(
+            676.5203681218851,
+            -1259.1392167224028,
+            771.3234287776531,
+            -176.6150291621406,
+            12.507343278686905,
+            -0.13857109526572012,
+            9.984369578019572e-6,
+            1.5056327351493116e-7
+        )
+        val g = 7.0
+        val x = z - 1.0
+        var sum = 0.9999999999998099
+        for (i in p.indices) {
+            sum += p[i] / (x + i + 1.0)
+        }
+        val t = x + g + 0.5
+        return sqrt(2.0 * PI) * t.pow(x + 0.5) * exp(-t) * sum
     }
 }

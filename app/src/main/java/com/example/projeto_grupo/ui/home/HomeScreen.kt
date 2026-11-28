@@ -389,7 +389,7 @@ fun HomeScreen(
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val allParams = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+                            val allParams = apiEq.params.ifEmpty { mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c) }
                             val usedNames = remember(apiEq.expression) {
                                 MathExpressionEvaluator.extractParameters(apiEq.expression)
                             }

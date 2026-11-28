@@ -33,7 +33,17 @@ data class AuthResponse(
     val accessToken: String,
     @SerialName("token_type")
     val tokenType: String = "bearer",
-    val user: UserResponse
+    val user: UserResponse,
+    @SerialName("api_key")
+    val apiKey: String? = null
+)
+
+@Serializable
+data class ApiKeyResponse(
+    @SerialName("api_key")
+    val apiKey: String,
+    @SerialName("api_key_prefix")
+    val apiKeyPrefix: String? = null
 )
 
 @Serializable
@@ -42,7 +52,8 @@ data class CreateEquationRequest(
     val expression: String,
     val a: Double = 1.0,
     val b: Double = 1.0,
-    val c: Double = 0.0
+    val c: Double = 0.0,
+    val params: Map<String, Double> = emptyMap()
 )
 
 @Serializable
@@ -53,10 +64,18 @@ data class ApiEquationResponse(
     val a: Double = 1.0,
     val b: Double = 1.0,
     val c: Double = 0.0,
+    val params: Map<String, Double> = emptyMap(),
     @SerialName("pointsOfInterest")
     val pointsOfInterest: List<PointOfInterest> = emptyList(),
     @SerialName("ownerId")
     val ownerId: String? = null,
     @SerialName("updatedAt")
     val updatedAt: String? = null
+)
+
+@Serializable
+data class UpdateVariablesRequest(
+    val variables: Map<String, Double>,
+    @SerialName("api_key")
+    val apiKey: String? = null
 )

@@ -31,6 +31,7 @@ import com.example.projeto_grupo.ui.ar.ARSceneScreen
 import com.example.projeto_grupo.ui.auth.AuthScreen
 import com.example.projeto_grupo.ui.EquationBottomSheet
 import com.example.projeto_grupo.ui.home.HomeScreen
+import com.example.projeto_grupo.ui.scan.ScanEquationScreen
 import com.example.projeto_grupo.ui.theme.Projeto_grupoTheme
 
 class MainActivity : ComponentActivity() {
@@ -123,6 +124,14 @@ fun Projeto_grupoApp(
                             )
                         }
                     }
+                    AppDestinations.SCANNER -> {
+                        ScanEquationScreen(
+                            viewModel = viewModel,
+                            hasCameraPermission = hasCameraPermission,
+                            onRequestCameraPermission = onRequestCameraPermission,
+                            onPlotInAR = { currentDestination = AppDestinations.AR_VIEWER }
+                        )
+                    }
                     AppDestinations.FAVORITES -> {
                         HomeScreen(
                             viewModel = viewModel,
@@ -204,6 +213,7 @@ enum class AppDestinations(
     val icon: Int,
 ) {
     AR_VIEWER("RA Equação", R.drawable.ic_home),
+    SCANNER("Digitalizar", R.drawable.ic_scanner),
     FAVORITES("Biblioteca", R.drawable.ic_favorite),
     PROFILE("Perfil", R.drawable.ic_account_box),
 }

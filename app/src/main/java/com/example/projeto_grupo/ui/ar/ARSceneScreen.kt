@@ -53,6 +53,7 @@ import com.example.projeto_grupo.data.model.PointType
 import com.example.projeto_grupo.ui.EquationViewModel
 import com.example.projeto_grupo.ui.MathExpressionEvaluator
 import com.example.projeto_grupo.ui.MathFormulaView
+import com.example.projeto_grupo.ui.components.CalculatorInputField
 import com.example.projeto_grupo.ui.components.PlacementEquationDialog
 import com.example.projeto_grupo.ui.components.ScientificCalculatorKeyboard
 import com.example.projeto_grupo.ui.components.backspaceAtSelection
@@ -1214,24 +1215,13 @@ private fun SaveEquationDialog(
                         }
                 )
 
-                val exprInteraction = remember { MutableInteractionSource() }
-                LaunchedEffect(exprInteraction) {
-                    exprInteraction.interactions.collect { interaction ->
-                        if (interaction is PressInteraction.Release) {
-                            activeCalcField = SAVE_EXPR_FIELD_KEY
-                            keyboardController?.hide()
-                        }
-                    }
-                }
-
-                OutlinedTextField(
+                CalculatorInputField(
                     value = expressionValue,
                     onValueChange = {
                         expressionValue = it
                         errorMessage = null
                     },
-                    readOnly = true,
-                    interactionSource = exprInteraction,
+                    onActivateCalculator = { activeCalcField = SAVE_EXPR_FIELD_KEY },
                     label = { Text("Expressão z = f(x, y)") },
                     trailingIcon = {
                         IconButton(onClick = { activeCalcField = SAVE_EXPR_FIELD_KEY }) {
@@ -1242,15 +1232,7 @@ private fun SaveEquationDialog(
                         }
                     },
                     isError = errorMessage != null,
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onFocusChanged { focusState ->
-                            if (focusState.isFocused) {
-                                activeCalcField = SAVE_EXPR_FIELD_KEY
-                                keyboardController?.hide()
-                            }
-                        }
+                    modifier = Modifier.fillMaxWidth()
                 )
 
                 if (detectedParams.isNotEmpty()) {
@@ -1260,33 +1242,15 @@ private fun SaveEquationDialog(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         detectedParams.forEach { param ->
-                            val paramInteraction = remember(param) { MutableInteractionSource() }
-                            LaunchedEffect(paramInteraction, param) {
-                                paramInteraction.interactions.collect { interaction ->
-                                    if (interaction is PressInteraction.Release) {
-                                        activeCalcField = param
-                                        keyboardController?.hide()
-                                    }
-                                }
-                            }
-                            OutlinedTextField(
+                            CalculatorInputField(
                                 value = paramValues[param] ?: TextFieldValue("1.0"),
                                 onValueChange = { updated ->
                                     paramValues = paramValues.toMutableMap().apply { put(param, updated) }
                                     errorMessage = null
                                 },
-                                readOnly = true,
-                                interactionSource = paramInteraction,
+                                onActivateCalculator = { activeCalcField = param },
                                 label = { Text(param) },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .width(95.dp)
-                                    .onFocusChanged { focusState ->
-                                        if (focusState.isFocused) {
-                                            activeCalcField = param
-                                            keyboardController?.hide()
-                                        }
-                                    }
+                                modifier = Modifier.width(95.dp)
                             )
                         }
                     }

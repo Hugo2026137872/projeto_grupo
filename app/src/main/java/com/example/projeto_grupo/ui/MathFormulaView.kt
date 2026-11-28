@@ -34,7 +34,18 @@ fun MathFormulaView(
     color: Color = LocalContentColor.current
 ) {
     val ast = remember(expression) {
-        runCatching { MathAstParser.parse(expression) }.getOrNull()
+        val displayExpr = if (
+            expression.contains("\\frac") ||
+            expression.contains("\\sqrt") ||
+            expression.contains("\\lfloor") ||
+            expression.contains("\\lceil") ||
+            expression.contains("|")
+        ) {
+            LatexToExpressionConverter.convert(expression).expression
+        } else {
+            expression
+        }
+        runCatching { MathAstParser.parse(displayExpr) }.getOrNull()
     }
 
     Row(
@@ -241,9 +252,15 @@ private fun RenderMathNode(
         }
 
         is MathAstNode.FunctionCall -> {
+            val displayFn = when (node.name) {
+                "pdx" -> "∂/∂x"
+                "pdy" -> "∂/∂y"
+                "grad" -> "∇"
+                else -> node.name
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 MathSymbolText(
-                    text = node.name,
+                    text = displayFn,
                     fontSize = fontSize,
                     color = color,
                     italic = false
@@ -381,7 +398,56 @@ private object MathAstParser {
         data object RParen : Tok
     }
 
-    private val functions = setOf("sin", "cos", "tan", "sqrt", "abs", "exp", "ln", "log")
+    private val functions = setOf(
+        "sin", "cos", "tan", "sqrt", "abs", "exp", "ln", "log",
+        "floor", "ceil", "pdx", "pdy", "grad"
+    )
+
+    private val symbolMap = mapOf(
+        "pi" to ("π" to false),
+        "partial" to ("∂" to false),
+        "nabla" to ("∇" to false),
+        "infty" to ("∞" to false),
+        "hbar" to ("ℏ" to true),
+        "aleph" to ("ℵ" to false),
+        "alpha" to ("α" to true),
+        "beta" to ("β" to true),
+        "gamma" to ("γ" to true),
+        "delta" to ("δ" to true),
+        "epsilon" to ("ε" to true),
+        "zeta" to ("ζ" to true),
+        "eta" to ("η" to true),
+        "theta" to ("θ" to true),
+        "vartheta" to ("ϑ" to true),
+        "iota" to ("ι" to true),
+        "kappa" to ("κ" to true),
+        "lambda" to ("λ" to true),
+        "mu" to ("μ" to true),
+        "nu" to ("ν" to true),
+        "xi" to ("ξ" to true),
+        "rho" to ("ρ" to true),
+        "sigma" to ("σ" to true),
+        "varsigma" to ("ς" to true),
+        "tau" to ("τ" to true),
+        "upsilon" to ("υ" to true),
+        "phi" to ("φ" to true),
+        "varphi" to ("φ" to true),
+        "chi" to ("χ" to true),
+        "psi" to ("ψ" to true),
+        "omega" to ("ω" to true),
+        "varpi" to ("ϖ" to true),
+        "Gamma" to ("Γ" to false),
+        "Delta" to ("Δ" to false),
+        "Theta" to ("Θ" to false),
+        "Lambda" to ("Λ" to false),
+        "Xi" to ("Ξ" to false),
+        "Pi" to ("Π" to false),
+        "Sigma" to ("Σ" to false),
+        "Upsilon" to ("Υ" to false),
+        "Phi" to ("Φ" to false),
+        "Psi" to ("Ψ" to false),
+        "Omega" to ("Ω" to false)
+    )
 
     fun parse(expression: String): MathAstNode {
         val tokens = tokenize(expression)
@@ -403,19 +469,40 @@ private object MathAstParser {
                     while (i < s.length && (s[i].isDigit() || s[i] == '.')) i++
                     raw += Tok.Num(s.substring(start, i))
                 }
+                ch == '\\' -> {
+                    i++
+                    if (i < s.length && s[i].isLetter()) {
+                        val start = i
+                        while (i < s.length && s[i].isLetter()) i++
+                        val macro = s.substring(start, i)
+                        when (macro) {
+                            "cdot", "times", "bullet", "circ", "odot", "otimes" -> raw += Tok.Op('*')
+                            "div" -> raw += Tok.Op('/')
+                            "pm", "oplus" -> raw += Tok.Op('+')
+                            "mp", "ominus" -> raw += Tok.Op('-')
+                            else -> raw += Tok.Id(macro)
+                        }
+                    } else if (i < s.length) {
+                        i++
+                    }
+                }
                 ch.isLetter() -> {
                     val start = i
                     while (i < s.length && (s[i].isLetterOrDigit() || s[i] == '_')) i++
                     raw += Tok.Id(s.substring(start, i))
                 }
-                ch == '(' -> {
+                ch == '(' || ch == '{' || ch == '[' -> {
                     raw += Tok.LParen; i++
                 }
-                ch == ')' -> {
+                ch == ')' || ch == '}' || ch == ']' -> {
                     raw += Tok.RParen; i++
                 }
                 ch in charArrayOf('+', '-', '*', '/', '^') -> {
                     raw += Tok.Op(ch); i++
+                }
+                ch == '!' -> {
+                    raw += Tok.Id("!")
+                    i++
                 }
                 else -> i++
             }
@@ -430,7 +517,8 @@ private object MathAstParser {
                 val next = raw[idx + 1]
                 val currEndsVal = curr is Tok.Num || curr is Tok.RParen ||
                         (curr is Tok.Id && curr.name.lowercase() !in functions)
-                val nextStartsVal = next is Tok.Num || next is Tok.LParen || next is Tok.Id
+                val nextStartsVal = next is Tok.Num || next is Tok.LParen ||
+                        (next is Tok.Id && next.name != "!")
                 if (currEndsVal && nextStartsVal) {
                     out += Tok.Op('*')
                 }
@@ -528,10 +616,13 @@ private object MathAstParser {
                             else -> MathAstNode.FunctionCall(lower, unwrapParens(arg))
                         }
                     } else {
-                        when (lower) {
-                            "pi" -> MathAstNode.Symbol("π", isItalic = false)
-                            "e" -> MathAstNode.Symbol("e", isItalic = true)
-                            else -> MathAstNode.Symbol(tok.name, isItalic = true)
+                        val mapped = symbolMap[tok.name] ?: symbolMap[lower]
+                        if (mapped != null) {
+                            MathAstNode.Symbol(mapped.first, isItalic = mapped.second)
+                        } else if (lower == "e") {
+                            MathAstNode.Symbol("e", isItalic = true)
+                        } else {
+                            MathAstNode.Symbol(tok.name, isItalic = tok.name != "!")
                         }
                     }
                 }

@@ -25,6 +25,14 @@ class AuthTokenManager(context: Context) {
         return prefs.getString(KEY_TOKEN, null)
     }
 
+    fun getApiKey(): String? {
+        return prefs.getString(KEY_API_KEY, null)
+    }
+
+    fun saveApiKey(apiKey: String) {
+        prefs.edit().putString(KEY_API_KEY, apiKey).apply()
+    }
+
     fun getUser(): UserResponse? {
         val id = prefs.getString(KEY_USER_ID, null) ?: return null
         val username = prefs.getString(KEY_USER_NAME, "") ?: ""
@@ -46,6 +54,7 @@ class AuthTokenManager(context: Context) {
     fun clearAuthSession() {
         prefs.edit()
             .remove(KEY_TOKEN)
+            .remove(KEY_API_KEY)
             .remove(KEY_USER_ID)
             .remove(KEY_USER_NAME)
             .remove(KEY_USER_EMAIL)
@@ -62,6 +71,7 @@ class AuthTokenManager(context: Context) {
         private const val DEFAULT_BASE_URL = "http://10.0.2.2:8000"
         private const val KEY_BASE_URL = "api_base_url"
         private const val KEY_TOKEN = "access_token"
+        private const val KEY_API_KEY = "user_api_key"
         private const val KEY_USER_ID = "user_id"
         private const val KEY_USER_NAME = "user_name"
         private const val KEY_USER_EMAIL = "user_email"

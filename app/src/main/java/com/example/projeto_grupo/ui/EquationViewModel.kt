@@ -1,6 +1,8 @@
 package com.example.projeto_grupo.ui
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.RectF
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.projeto_grupo.data.api.EquationApiService
@@ -14,12 +16,16 @@ import com.example.projeto_grupo.data.model.LoginRequest
 import com.example.projeto_grupo.data.model.RegisterRequest
 import com.example.projeto_grupo.data.model.UpdateEquationRequest
 import com.example.projeto_grupo.data.model.UserResponse
+import com.example.projeto_grupo.ml.MathOcrEngine
+import com.example.projeto_grupo.ml.OcrResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class EquationPreset(
@@ -100,19 +106,24 @@ data class EquationUiState(
     val isLoggedIn: Boolean = false,
     val currentUser: UserResponse? = null,
     val authToken: String? = null,
+    val userApiKey: String? = null,
     val isServerConnected: Boolean? = null,
     val authLoading: Boolean = false,
     val authErrorMessage: String? = null,
     val authSuccessMessage: String? = null,
     val serverEquations: List<ApiEquationResponse> = emptyList(),
-    val isSyncingCloud: Boolean = false
+    val isSyncingCloud: Boolean = false,
+    val activeCloudEquationId: String? = null,
+    val activeCloudUpdatedAt: String? = null
 )
 
 class EquationViewModel(application: Application) : AndroidViewModel(application) {
     private val apiService = EquationApiService()
     private val localRepo = LocalEquationRepository(application.applicationContext)
     private val authManager = AuthTokenManager(application.applicationContext)
+    private val ocrEngine by lazy { MathOcrEngine(application.applicationContext) }
     private var poiJob: Job? = null
+    private var cloudWatchJob: Job? = null
 
     private val _uiState = MutableStateFlow(EquationUiState())
     val uiState: StateFlow<EquationUiState> = _uiState.asStateFlow()
@@ -125,6 +136,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         apiService.setBaseUrl(savedBaseUrl)
 
         val token = authManager.getToken()
+        val storedApiKey = authManager.getApiKey()
         val user = authManager.getUser()
         val loggedIn = authManager.isLoggedIn()
 
@@ -157,7 +169,8 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 baseUrlInput = savedBaseUrl,
                 isLoggedIn = loggedIn,
                 currentUser = user,
-                authToken = token
+                authToken = token,
+                userApiKey = storedApiKey
             )
         }
         recomputePoisAsync(activeExpr, activeParams, _uiState.value.xDomain, _uiState.value.yDomain)
@@ -174,7 +187,83 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
+        cloudWatchJob?.cancel()
         apiService.close()
+        ocrEngine.close()
+    }
+
+    private fun stopCloudEquationWatcher() {
+        cloudWatchJob?.cancel()
+        cloudWatchJob = null
+        _uiState.update {
+            it.copy(
+                activeCloudEquationId = null,
+                activeCloudUpdatedAt = null
+            )
+        }
+    }
+
+    private fun startCloudEquationWatcher(equationId: String) {
+        cloudWatchJob?.cancel()
+        cloudWatchJob = viewModelScope.launch {
+            while (isActive) {
+                delay(1_500L)
+                val current = _uiState.value
+                if (current.activeCloudEquationId != equationId) break
+
+                val res = apiService.getEquationRaw(
+                    id = equationId,
+                    baseUrl = current.baseUrlInput,
+                    token = current.authToken
+                )
+                res.onSuccess { remote ->
+                    val latest = _uiState.value
+                    if (latest.activeCloudEquationId != equationId) return@onSuccess
+
+                    val remoteSource = remote.params.ifEmpty {
+                        mapOf("a" to remote.a, "b" to remote.b, "c" to remote.c)
+                    }
+                    val remoteParams = filterParamsForExpression(remote.expression, remoteSource)
+                    val changed = remote.updatedAt != latest.activeCloudUpdatedAt ||
+                        remoteParams != latest.equation.getEffectiveParams() ||
+                        remote.expression != latest.equation.expression
+
+                    if (changed && MathExpressionEvaluator.validate(remote.expression, remoteParams) == null) {
+                        localRepo.saveActiveEquation(remote.expression, remoteParams)
+                        _uiState.update { state ->
+                            state.copy(
+                                equation = state.equation.copy(
+                                    id = remote.id,
+                                    title = remote.title,
+                                    expression = remote.expression,
+                                    a = remoteParams["a"] ?: remote.a,
+                                    b = remoteParams["b"] ?: remote.b,
+                                    c = remoteParams["c"] ?: remote.c,
+                                    params = remoteParams
+                                ),
+                                expressionInput = remote.expression,
+                                paramsInput = remoteParams.mapValues { e -> e.value.toString() },
+                                aInput = remoteParams["a"]?.toString() ?: "",
+                                bInput = remoteParams["b"]?.toString() ?: "",
+                                cInput = remoteParams["c"]?.toString() ?: "",
+                                activeCloudUpdatedAt = remote.updatedAt,
+                                expressionError = null
+                            )
+                        }
+                        recomputePoisAsync(remote.expression, remoteParams, latest.xDomain, latest.yDomain)
+                    } else if (remote.updatedAt != latest.activeCloudUpdatedAt) {
+                        _uiState.update { it.copy(activeCloudUpdatedAt = remote.updatedAt) }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun recognizeHandwrittenEquation(
+        bitmap: Bitmap,
+        cropRect: RectF? = null
+    ): Result<OcrResult> = runCatching {
+        ocrEngine.recognize(bitmap, cropRect)
     }
 
     private fun recomputePoisAsync(
@@ -251,12 +340,14 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
             res.fold(
                 onSuccess = { authResp ->
                     authManager.saveAuthSession(authResp.accessToken, authResp.user)
+                    authResp.apiKey?.let { authManager.saveApiKey(it) }
                     _uiState.update {
                         it.copy(
                             authLoading = false,
                             isLoggedIn = true,
                             currentUser = authResp.user,
                             authToken = authResp.accessToken,
+                            userApiKey = authResp.apiKey ?: authManager.getApiKey(),
                             authSuccessMessage = "Registo efetuado com sucesso!",
                             authErrorMessage = null
                         )
@@ -320,13 +411,43 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun rotateApiKey() {
+        val token = _uiState.value.authToken ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authErrorMessage = null, authSuccessMessage = null) }
+            val res = apiService.rotateApiKey(_uiState.value.baseUrlInput, token)
+            res.fold(
+                onSuccess = { resp ->
+                    authManager.saveApiKey(resp.apiKey)
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            userApiKey = resp.apiKey,
+                            authSuccessMessage = "Nova API Key gerada com sucesso!"
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            authErrorMessage = err.message ?: "Erro ao gerar API Key."
+                        )
+                    }
+                }
+            )
+        }
+    }
+
     fun logoutUser() {
+        stopCloudEquationWatcher()
         authManager.clearAuthSession()
         _uiState.update {
             it.copy(
                 isLoggedIn = false,
                 currentUser = null,
                 authToken = null,
+                userApiKey = null,
                 authSuccessMessage = "Sessão terminada.",
                 authErrorMessage = null,
                 serverEquations = emptyList()
@@ -413,6 +534,10 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         val c = parsedParams["c"] ?: 0.0
         val cleanName = name.trim().ifEmpty { "z = f(x, y) = $expr" }
 
+        if (_uiState.value.serverEquations.any { it.title.equals(cleanName, ignoreCase = true) }) {
+            return "Já existe uma equação na nuvem com o nome '$cleanName'. Escolha outro nome."
+        }
+
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, saveFeedbackMessage = null) }
             val req = CreateEquationRequest(
@@ -420,18 +545,22 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 expression = expr,
                 a = a,
                 b = b,
-                c = c
+                c = c,
+                params = parsedParams
             )
             val res = apiService.createEquation(_uiState.value.baseUrlInput, req, token)
             res.fold(
-                onSuccess = {
+                onSuccess = { created ->
                     _uiState.update {
                         it.copy(
                             isLoading = false,
                             saveFeedbackMessage = "Equação guardada na nuvem com o nome '$cleanName'!",
-                            saveNameInput = ""
+                            saveNameInput = "",
+                            activeCloudEquationId = created.id,
+                            activeCloudUpdatedAt = created.updatedAt
                         )
                     }
+                    startCloudEquationWatcher(created.id)
                     fetchServerEquations()
                     onResult?.invoke(Result.success(cleanName))
                 },
@@ -492,7 +621,8 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
 
     fun applyApiEquation(apiEq: ApiEquationResponse): EquationModel {
         val expr = apiEq.expression
-        val effectiveParams = filterParamsForExpression(expr, mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c))
+        val sourceParams = apiEq.params.ifEmpty { mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c) }
+        val effectiveParams = filterParamsForExpression(expr, sourceParams)
         localRepo.saveActiveEquation(expr, effectiveParams)
 
         val currentState = _uiState.value
@@ -500,9 +630,9 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
             id = apiEq.id,
             title = apiEq.title,
             expression = expr,
-            a = apiEq.a,
-            b = apiEq.b,
-            c = apiEq.c,
+            a = effectiveParams["a"] ?: apiEq.a,
+            b = effectiveParams["b"] ?: apiEq.b,
+            c = effectiveParams["c"] ?: apiEq.c,
             params = effectiveParams
         )
 
@@ -514,10 +644,13 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
                 aInput = effectiveParams["a"]?.toString() ?: "",
                 bInput = effectiveParams["b"]?.toString() ?: "",
                 cInput = effectiveParams["c"]?.toString() ?: "",
+                activeCloudEquationId = apiEq.id,
+                activeCloudUpdatedAt = apiEq.updatedAt,
                 expressionError = null,
                 saveFeedbackMessage = null
             )
         }
+        startCloudEquationWatcher(apiEq.id)
         recomputePoisAsync(expr, effectiveParams, currentState.xDomain, currentState.yDomain)
         return updatedEquation
     }
@@ -728,6 +861,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
         expression: String,
         params: Map<String, Double>
     ): EquationModel {
+        stopCloudEquationWatcher()
         val expr = expression.trim()
         val effectiveParams = filterParamsForExpression(expr, params)
         val a = effectiveParams["a"] ?: 1.0
@@ -763,6 +897,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun applySavedEquation(saved: SavedEquation): EquationModel {
+        stopCloudEquationWatcher()
         val usedParams = saved.getUsedParams()
         localRepo.saveActiveEquation(saved.expression, usedParams)
 
@@ -803,6 +938,7 @@ class EquationViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun applyPreset(preset: EquationPreset) {
+        stopCloudEquationWatcher()
         val presetParams = filterParamsForExpression(
             preset.expression,
             mapOf("a" to preset.a, "b" to preset.b, "c" to preset.c)

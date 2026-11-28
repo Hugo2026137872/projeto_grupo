@@ -1,6 +1,7 @@
 package com.example.projeto_grupo.data.api
 
 import com.example.projeto_grupo.data.model.ApiEquationResponse
+import com.example.projeto_grupo.data.model.ApiKeyResponse
 import com.example.projeto_grupo.data.model.AuthResponse
 import com.example.projeto_grupo.data.model.CreateEquationRequest
 import com.example.projeto_grupo.data.model.EquationModel
@@ -9,6 +10,7 @@ import com.example.projeto_grupo.data.model.PointOfInterest
 import com.example.projeto_grupo.data.model.PointType
 import com.example.projeto_grupo.data.model.RegisterRequest
 import com.example.projeto_grupo.data.model.UpdateEquationRequest
+import com.example.projeto_grupo.data.model.UpdateVariablesRequest
 import com.example.projeto_grupo.data.model.UserResponse
 import io.ktor.client.*
 import io.ktor.client.call.*
@@ -152,6 +154,69 @@ class EquationApiService(
         }
     }
 
+    suspend fun getEquationRaw(
+        id: String,
+        baseUrl: String = defaultBaseUrl,
+        token: String? = null
+    ): Result<ApiEquationResponse> {
+        return try {
+            val response = client.get("$baseUrl/equations/$id") {
+                token?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                val errorMsg = extractErrorMessage(response.bodyAsText(), "Erro ao obter equação.")
+                Result.failure(Exception(errorMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(Exception(e.localizedMessage ?: "Erro de ligação ao servidor."))
+        }
+    }
+
+    suspend fun rotateApiKey(
+        baseUrl: String = defaultBaseUrl,
+        token: String
+    ): Result<ApiKeyResponse> {
+        return try {
+            val response = client.post("$baseUrl/auth/api-key/rotate") {
+                header(HttpHeaders.Authorization, "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                val errorMsg = extractErrorMessage(response.bodyAsText(), "Erro ao gerar nova API key.")
+                Result.failure(Exception(errorMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(Exception(e.localizedMessage ?: "Erro de ligação ao servidor."))
+        }
+    }
+
+    suspend fun updateEquationVariables(
+        id: String,
+        variables: Map<String, Double>,
+        baseUrl: String = defaultBaseUrl,
+        token: String? = null,
+        apiKey: String? = null
+    ): Result<ApiEquationResponse> {
+        return try {
+            val response = client.patch("$baseUrl/equations/$id/variables") {
+                contentType(ContentType.Application.Json)
+                token?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+                setBody(UpdateVariablesRequest(variables = variables, apiKey = apiKey))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                val errorMsg = extractErrorMessage(response.bodyAsText(), "Erro ao atualizar variáveis.")
+                Result.failure(Exception(errorMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(Exception(e.localizedMessage ?: "Erro de ligação ao servidor."))
+        }
+    }
+
     suspend fun getEquation(
         id: String,
         baseUrl: String = defaultBaseUrl,
@@ -255,6 +320,9 @@ class EquationApiService(
     }
 
     private fun apiEqToModel(apiEq: ApiEquationResponse): EquationModel {
+        val effectiveParams = apiEq.params.ifEmpty {
+            mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+        }
         return EquationModel(
             id = apiEq.id,
             title = apiEq.title,
@@ -262,7 +330,7 @@ class EquationApiService(
             a = apiEq.a,
             b = apiEq.b,
             c = apiEq.c,
-            params = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c),
+            params = effectiveParams,
             pointsOfInterest = apiEq.pointsOfInterest
         )
     }

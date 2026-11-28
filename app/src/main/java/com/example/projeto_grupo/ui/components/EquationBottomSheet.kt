@@ -1,5 +1,6 @@
 package com.example.projeto_grupo.ui
 
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -33,6 +34,7 @@ import com.example.projeto_grupo.data.local.SavedEquation
 import com.example.projeto_grupo.data.model.ApiEquationResponse
 import com.example.projeto_grupo.data.model.PointOfInterest
 import com.example.projeto_grupo.data.model.PointType
+import com.example.projeto_grupo.ui.components.CalculatorInputField
 import com.example.projeto_grupo.ui.components.ScientificCalculatorKeyboard
 import com.example.projeto_grupo.ui.components.backspaceAtSelection
 import com.example.projeto_grupo.ui.components.insertTokenAtSelection
@@ -138,6 +140,37 @@ private fun DetailsAndPoisTab(
                         expression = displayVal,
                         prefix = "$param = ",
                         fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        uiState.activeCloudEquationId?.let { cloudId ->
+            val username = uiState.currentUser?.username?.takeIf { it.isNotBlank() }
+            val eqName = uiState.equation.title.takeIf { it.isNotBlank() }
+            val basePath = if (username != null && eqName != null) {
+                "${uiState.baseUrlInput}/${Uri.encode(username)}/${Uri.encode(eqName)}"
+            } else {
+                "${uiState.baseUrlInput}/equations/$cloudId"
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Text(
+                        text = "Sincronização Nuvem Ativa (${eqName ?: cloudId})",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "API: PATCH $basePath/variables\nBody: {\"api_key\": \"<chave_no_perfil>\", \"variables\": {...}}\nControlo Web: $basePath/control",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -302,17 +335,7 @@ private fun EditEquationTab(
             }
         }
 
-        val exprInteraction = remember { MutableInteractionSource() }
-        LaunchedEffect(exprInteraction) {
-            exprInteraction.interactions.collect { interaction ->
-                if (interaction is PressInteraction.Release) {
-                    activeCalcField = SHEET_EXPR_FIELD_KEY
-                    keyboardController?.hide()
-                }
-            }
-        }
-
-        OutlinedTextField(
+        CalculatorInputField(
             value = exprFieldValue,
             onValueChange = { updated ->
                 exprFieldValue = updated
@@ -320,8 +343,7 @@ private fun EditEquationTab(
                     onExpressionChange(updated.text)
                 }
             },
-            readOnly = true,
-            interactionSource = exprInteraction,
+            onActivateCalculator = { activeCalcField = SHEET_EXPR_FIELD_KEY },
             label = { Text("Expressão z = f(x, y)") },
             trailingIcon = {
                 IconButton(onClick = { activeCalcField = SHEET_EXPR_FIELD_KEY }) {
@@ -333,15 +355,7 @@ private fun EditEquationTab(
             },
             isError = uiState.expressionError != null,
             supportingText = uiState.expressionError?.let { err -> { Text(err) } },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .onFocusChanged { focusState ->
-                    if (focusState.isFocused) {
-                        activeCalcField = SHEET_EXPR_FIELD_KEY
-                        keyboardController?.hide()
-                    }
-                }
+            modifier = Modifier.fillMaxWidth()
         )
 
         if (detectedParams.isNotEmpty()) {
@@ -351,18 +365,9 @@ private fun EditEquationTab(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 detectedParams.forEach { param ->
-                    val paramInteraction = remember(param) { MutableInteractionSource() }
-                    LaunchedEffect(paramInteraction, param) {
-                        paramInteraction.interactions.collect { interaction ->
-                            if (interaction is PressInteraction.Release) {
-                                activeCalcField = param
-                                keyboardController?.hide()
-                            }
-                        }
-                    }
                     val currVal = paramFieldValues[param]
                         ?: TextFieldValue(uiState.paramsInput[param] ?: "1.0")
-                    OutlinedTextField(
+                    CalculatorInputField(
                         value = currVal,
                         onValueChange = { updated ->
                             paramFieldValues = paramFieldValues.toMutableMap().apply {
@@ -372,18 +377,9 @@ private fun EditEquationTab(
                                 onParamChange(param, updated.text)
                             }
                         },
-                        readOnly = true,
-                        interactionSource = paramInteraction,
+                        onActivateCalculator = { activeCalcField = param },
                         label = { Text(param) },
-                        singleLine = true,
-                        modifier = Modifier
-                            .width(96.dp)
-                            .onFocusChanged { focusState ->
-                                if (focusState.isFocused) {
-                                    activeCalcField = param
-                                    keyboardController?.hide()
-                                }
-                            }
+                        modifier = Modifier.width(96.dp)
                     )
                 }
             }
@@ -644,7 +640,7 @@ private fun CloudEquationCard(
     onSelect: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val allParams = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+    val allParams = apiEq.params.ifEmpty { mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c) }
     val usedNames = remember(apiEq.expression) {
         MathExpressionEvaluator.extractParameters(apiEq.expression)
     }

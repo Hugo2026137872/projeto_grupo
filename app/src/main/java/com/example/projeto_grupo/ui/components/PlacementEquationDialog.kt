@@ -379,7 +379,7 @@ fun PlacementEquationDialog(
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 cloudEquations.forEach { apiEq ->
                                     val isSelected = apiEq.id == selectedCloudId
-                                    val allParams = mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c)
+                                    val allParams = apiEq.params.ifEmpty { mapOf("a" to apiEq.a, "b" to apiEq.b, "c" to apiEq.c) }
                                     val usedNames = remember(apiEq.expression) {
                                         MathExpressionEvaluator.extractParameters(apiEq.expression)
                                     }
@@ -437,24 +437,13 @@ fun PlacementEquationDialog(
                         HorizontalDivider()
                     }
 
-                    val exprInteraction = remember { MutableInteractionSource() }
-                    LaunchedEffect(exprInteraction) {
-                        exprInteraction.interactions.collect { interaction ->
-                            if (interaction is PressInteraction.Release) {
-                                activeCalcField = EXPR_FIELD_KEY
-                                keyboardController?.hide()
-                            }
-                        }
-                    }
-
-                    OutlinedTextField(
+                    CalculatorInputField(
                         value = expressionValue,
                         onValueChange = {
                             expressionValue = it
                             validationError = null
                         },
-                        readOnly = true,
-                        interactionSource = exprInteraction,
+                        onActivateCalculator = { activeCalcField = EXPR_FIELD_KEY },
                         label = { Text("Expressão z = f(x, y)") },
                         placeholder = { Text("Ex: a * sin(b * x) * cos(b * y) + c") },
                         trailingIcon = {
@@ -467,15 +456,7 @@ fun PlacementEquationDialog(
                         },
                         isError = validationError != null,
                         supportingText = validationError?.let { err -> { Text(err) } },
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .onFocusChanged { focusState ->
-                                if (focusState.isFocused) {
-                                    activeCalcField = EXPR_FIELD_KEY
-                                    keyboardController?.hide()
-                                }
-                            }
+                        modifier = Modifier.fillMaxWidth()
                     )
 
                     if (detectedParams.isNotEmpty()) {
@@ -489,33 +470,15 @@ fun PlacementEquationDialog(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             detectedParams.forEach { param ->
-                                val paramInteraction = remember(param) { MutableInteractionSource() }
-                                LaunchedEffect(paramInteraction, param) {
-                                    paramInteraction.interactions.collect { interaction ->
-                                        if (interaction is PressInteraction.Release) {
-                                            activeCalcField = param
-                                            keyboardController?.hide()
-                                        }
-                                    }
-                                }
-                                OutlinedTextField(
+                                CalculatorInputField(
                                     value = paramValues[param] ?: TextFieldValue("1.0"),
                                     onValueChange = { newVal ->
                                         paramValues = paramValues.toMutableMap().apply { put(param, newVal) }
                                         validationError = null
                                     },
-                                    readOnly = true,
-                                    interactionSource = paramInteraction,
+                                    onActivateCalculator = { activeCalcField = param },
                                     label = { Text(param) },
-                                    singleLine = true,
-                                    modifier = Modifier
-                                        .width(95.dp)
-                                        .onFocusChanged { focusState ->
-                                            if (focusState.isFocused) {
-                                                activeCalcField = param
-                                                keyboardController?.hide()
-                                            }
-                                        }
+                                    modifier = Modifier.width(95.dp)
                                 )
                             }
                         }

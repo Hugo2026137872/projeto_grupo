@@ -39,5 +39,6 @@ data class UpdateEquationRequest(
     val expression: String,
     val a: Double,
     val b: Double,
-    val c: Double
+    val c: Double,
+    val params: Map<String, Double> = emptyMap()
 )
